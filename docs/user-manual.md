@@ -1,8 +1,10 @@
-## 2. easy-bg 用户手册 / User Manual
+# pi-easy-bg — User Manual
 
-> 以下正文按 ASD-STE100（Simplified Technical English）写法：短句、主动语态、一句一个动作、术语统一。中文速查见最后一节。
+This manual is the reference for every command, mode and failure case. The text follows
+ASD-STE100 (Simplified Technical English): short sentences, active voice, one action per
+sentence, consistent terms. A Chinese quick reference is at the end.
 
-### 2.1 What this tool does
+## 2.1 What this tool does
 
 `easy-bg` runs a shell command in the background. pi does not wait for the command. You can keep talking in the chat.
 When the command finishes, `easy-bg` tells pi the result. pi then answers you.
@@ -54,7 +56,7 @@ The exit code is saved in these cases too:
 
 The task then shows `FAIL exit=3`.
 
-### 2.2 Start a task
+## 2.2 Start a task
 
 Type the command after `/easy-bg`:
 
@@ -84,7 +86,7 @@ Use `&&` (or `;`) when you want the task to finish after the command. Put a proc
 
 You can start several tasks one after another. pi keeps at most **8** running tasks. A short command does not need `easy-bg`: each wake-up message starts one model turn. Use the built-in `bash` tool for a command under one minute.
 
-### 2.3 Check the tasks
+## 2.3 Check the tasks
 
 Run this at any time:
 
@@ -105,7 +107,7 @@ bg-9f2c7a  RUNNING      15s                 make -j8 build
 
 `/easy-bg ls` does not use any model tokens. You can run it often.
 
-### 2.4 Read the output
+## 2.4 Read the output
 
 ```
 /easy-bg log bg-9f2c7a        # last 40 lines
@@ -118,7 +120,7 @@ The log file stays on disk. You can also open it yourself:
 ~/.pi/agent/easy-bg/bg-9f2c7a/out.log
 ```
 
-### 2.5 Stop a task
+## 2.5 Stop a task
 
 ```
 /easy-bg stop bg-9f2c7a
@@ -128,7 +130,7 @@ This sends a signal to the **whole process group**. The command and all its chil
 
 If the prefix matches more than one task, pi prints `ambiguous id prefix` and lists the tasks. Nothing stops. Type more characters.
 
-### 2.6 Results and interruptions
+## 2.6 Results and interruptions
 
 A finished task does not take over the chat. This is the default behaviour (`--notify auto`):
 
@@ -238,7 +240,7 @@ If the task output matches a pattern you gave, one early card appears too:
 
 Do not use `/easy-bg ls` to wait for a task. The card comes to you. This saves model tokens.
 
-### 2.7 Status words
+## 2.7 Status words
 
 | Word | Meaning | What you do |
 |---|---|---|
@@ -250,7 +252,7 @@ Do not use `/easy-bg ls` to wait for a task. The card comes to you. This saves m
 | `OUTPUT_CAP` | pi stopped the task because the log got too big | Make the command quieter, or raise the cap |
 | `EXITED` | The process is gone, but the exit code is not available | Read the log |
 
-### 2.8 Options for one task
+## 2.8 Options for one task
 
 | Option | Effect | Default |
 |---|---|---|
@@ -270,7 +272,7 @@ Examples:
 
 For a running dev server, always use `--timeout 0`. Otherwise pi stops it after 600 seconds.
 
-### 2.9 Options for the whole tool
+## 2.9 Options for the whole tool
 
 | You set | Effect |
 |---|---|
@@ -284,13 +286,13 @@ For a running dev server, always use `--timeout 0`. Otherwise pi stops it after 
 
 Limits that do not change: 8 running tasks, 7 days or 50 finished tasks in the record. Run `/easy-bg clear` to delete the finished records and their logs.
 
-### 2.10 When you close pi
+## 2.10 When you close pi
 
 pi leaves running tasks alive and tells you how many are running. When you start pi again later, the new pi takes over those tasks. It watches them and tells you when they finish.
 
 If you want pi to stop its tasks on exit, start pi with `--easy-bg-kill-all`.
 
-### 2.11 Problems and what to do
+## 2.11 Problems and what to do
 
 | You see | Cause | What you do |
 |---|---|---|
@@ -305,11 +307,11 @@ If you want pi to stop its tasks on exit, start pi with `--easy-bg-kill-all`.
 | No message and no card | You used `--no-notify` / `--notify manual`, or you changed `EASY_BG_DIR` | Run `/easy-bg ls` |
 | The card appears but the model does not act | Normal: pi waits until you are idle and quiet for `QUIET_MS` | Wait a few seconds, or run `/easy-bg now` |
 | A result came back while I was doing something else | By design: the card never enters your next turn | Ignore it, or run `/easy-bg now` when you want it |
-| The card has no `■ background` line, or the card shows every log line | pi runs an older copy of the extension, or the extension failed to load | On start, pi shows `● easy-bg …` and the footer shows `easy-bg v4: park/auto\|now\|park\|manual …`. If those are missing, read the start-up line `Failed to load extension "…"` and restart pi with `/quit` (a plain `/reload` may keep an old instance) |
+| The card has no `■ background` line, or the card shows every log line | pi runs an older copy of the extension, or the extension failed to load | On start, pi shows `easy-bg v1.0.0 …` and the footer shows `easy-bg v1.0.0 · /easy-bg help · notify: auto|now|park|manual`. If those are missing, read the start-up line `Failed to load extension "…"` and restart pi with `/quit` (a plain `/reload` may keep an old instance) |
 | The model waits with `sleep`/`tail` after starting a task | The model polled instead of ending its turn | Update the extension (tool description and `run` output now say: end the turn). Re-run; if it polls again, tell it explicitly: “start it and wait for the result” |
 | The model does not answer the wake-up message | The message waits for the running turn | Wait for the current answer |
 
-### 2.12 中文速查
+## 2.12 中文速查
 
 | 命令 | 作用 |
 |---|---|
