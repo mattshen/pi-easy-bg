@@ -1,6 +1,6 @@
 {
   "name": "pi-easy-bg",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Background shell tasks for pi: start long commands without blocking the chat, and get results back without polling or losing your place.",
   "keywords": [
     "pi-package",
@@ -61,6 +61,7 @@
   "scripts": {
     "check": "node scripts/check-imports.mjs",
     "test": "node --test test/core.test.ts",
+    "integration-test": "node scripts/integration-test.mjs",
     "verify": "npm run check && npm test"
   }
 }

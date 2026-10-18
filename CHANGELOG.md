@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-10-18
+
+### Added
+
+- **`npm run integration-test`** (`scripts/integration-test.mjs`): 20 assertions driven
+  through a real pi process over RPC, using only slash commands so no model is involved.
+  Covers the seven task states, `set -e` and shebang exit codes, output-cap truncation,
+  park vs `--notify manual`, and both `clear` variants. It also asserts that no
+  `extension_error` event fires at all, because an exception inside a handler silently
+  disables the extension — the failure mode behind the two 1.0.x regressions.
+- The run is isolated: `pi -ne` disables extension discovery (so the installed package
+  cannot collide with the working copy) and `EASY_BG_DIR` points at a temporary directory.
+  The user's settings, state and installed packages are untouched.
+
+### Notes
+
+- Both guards were verified in the failing direction: removing one import makes
+  `npm run check` report it precisely, and makes the integration test fail by timing out
+  on the first state transition (which is exactly how an uncaught `session_start` error
+  presents itself).
+
 ## [1.0.2] - 2026-10-18
 
 ### Fixed
