@@ -1,0 +1,58 @@
+{
+  "name": "pi-easy-bg",
+  "version": "1.0.0",
+  "description": "Background shell tasks for pi: start long commands without blocking the chat, and get results back without polling or losing your place.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "background",
+    "jobs",
+    "async",
+    "tasks"
+  ],
+  "license": "MIT",
+  "author": "Matt Shen <lovelywib@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattshen/pi-easy-bg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mattshen/pi-easy-bg/issues"
+  },
+  "homepage": "https://github.com/mattshen/pi-easy-bg#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/easy-bg.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "files": [
+    "extensions/",
+    "docs/",
+    "examples/",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
+}
