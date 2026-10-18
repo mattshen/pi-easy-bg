@@ -5,6 +5,7 @@
  * loop and result delivery. Plain logic lives in `src/core.ts`.
  */
 
+import * as fs from "node:fs";
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";

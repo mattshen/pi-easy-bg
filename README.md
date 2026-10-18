@@ -193,7 +193,7 @@ Task ids are random and never reused, so logs and dedupe keys can not collide af
 ```bash
 git clone https://github.com/mattshen/pi-easy-bg
 cd pi-easy-bg
-node --test test/core.test.ts     # 34 unit tests, no install step (Node >= 22.18)
+npm run verify                    # import check + 34 unit tests, no install step (Node >= 22.18)
 pi -e .                           # load the working copy for one run
 ```
 

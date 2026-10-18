@@ -187,7 +187,7 @@ sys.exit(4)          # -> FAIL exit=4
 ```bash
 git clone https://github.com/mattshen/pi-easy-bg
 cd pi-easy-bg
-node --test test/core.test.ts     # 34 个单元测试，无需安装依赖（Node >= 22.18）
+npm run verify                    # import check + 34 个单元测试，无需安装依赖（Node >= 22.18）
 pi -e .                           # 临时加载工作副本
 ```
 
