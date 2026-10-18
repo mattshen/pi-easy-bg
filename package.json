@@ -1,6 +1,6 @@
 {
   "name": "pi-easy-bg",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Background shell tasks for pi: start long commands without blocking the chat, and get results back without polling or losing your place.",
   "keywords": [
     "pi-package",
@@ -23,7 +23,7 @@
   "homepage": "https://github.com/mattshen/pi-easy-bg#readme",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   },
   "pi": {
     "extensions": [
@@ -48,11 +48,16 @@
   },
   "files": [
     "extensions/",
+    "src/",
+    "test/",
     "docs/",
     "examples/",
     "README.md",
     "README.zh-CN.md",
     "CHANGELOG.md",
     "LICENSE"
-  ]
+  ],
+  "scripts": {
+    "test": "node --test test/core.test.ts"
+  }
 }

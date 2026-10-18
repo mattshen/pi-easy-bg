@@ -182,6 +182,23 @@ sys.exit(4)          # -> FAIL exit=4
 
 任务 id 随机且永不复用，所以 `clear`、GC、重启之后日志目录与去重键都不会相撞。运行中的任务会被下一个看到它的 pi 会话接管（心跳租约）。
 
+## 开发
+
+```bash
+git clone https://github.com/mattshen/pi-easy-bg
+cd pi-easy-bg
+node --test test/core.test.ts     # 34 个单元测试，无需安装依赖（Node >= 22.18）
+pi -e .                           # 临时加载工作副本
+```
+
+`src/core.ts` 放所有纯逻辑（状态文件、id、日志尾部、状态判定、启动任务、watch 模式、格式化），不 import 任何 pi 包，因此可用 `node --test` 直接单测；`extensions/easy-bg.ts` 只做 pi 集成（工具、斜杠命令、卡片、观测循环、投递）。
+
+### 已知限制
+
+- 输出上限靠轮询日志大小实现（`CAP_CHECK_MS` = 100ms）。极快的输出（例如 `yes`）可能在两次检查之间超出上限。实测：400 字节上限下裸 `yes` 峰值约 80 MiB，随后进程组被杀、日志截断回上限。默认 20 MiB 上限下不是实际问题，但这**不是**内核级限制。
+- 按进程组杀任务，所以命令自己 `setsid` / `nohup … &` 脱离进程组时会逃过清理。
+- 终态在 wrapper 进程退出时记录，而不是所有子孙退出：`cmd &` 不加 `wait` 会让任务提前结束、子进程继续跑。
+
 ## 文档
 
 - [用户手册](docs/user-manual.md) — 每条命令、每种模式与失败情形

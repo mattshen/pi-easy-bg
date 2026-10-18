@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# demo-task.sh — easy-bg 练习脚本：查询 "RTX 5090 price"，约 10s 返回 3 条报价
+# demo-task.sh — easy-bg practice script: "query RTX 5090 prices", ~10s, prints 3 offers
+#
+# NOTE: the three offers below are illustrative sample data written into this file.
+#       The script does not access the network. Do not use these prices for a real purchase.
 #
 # 用法: bash demo-task.sh [--steps <轮数>] [--gap <每轮秒数>] [--fail] [--spam] [--watchme <标记>]
 #   默认 steps=2 gap=5  -> 约 10s

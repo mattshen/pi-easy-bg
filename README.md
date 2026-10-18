@@ -188,6 +188,32 @@ After `run`, the tool tells the model to end its turn — the result comes back 
 
 Task ids are random and never reused, so logs and dedupe keys can not collide after `clear`, GC, or a restart. Running tasks are adopted by the next pi session that sees them (heartbeat lease).
 
+## Development
+
+```bash
+git clone https://github.com/mattshen/pi-easy-bg
+cd pi-easy-bg
+node --test test/core.test.ts     # 34 unit tests, no install step (Node >= 22.18)
+pi -e .                           # load the working copy for one run
+```
+
+`src/core.ts` holds every piece of plain logic (state files, ids, log tails, status
+resolution, task spawning, watch patterns, formatting) and imports nothing from pi, so it
+is unit-testable with `node --test`. `extensions/easy-bg.ts` is only the pi integration
+(tool, slash command, cards, observation loop, delivery).
+
+### Known limitations
+
+- The output cap is enforced by polling the log size (`CAP_CHECK_MS`, 100 ms). A command
+  that writes extremely fast (for example `yes`) can exceed the cap between two checks.
+  Measurement: a bare `yes` against a 400-byte cap peaks around 80 MiB before the process
+  group is killed and the log is truncated back to the cap. With the default 20 MiB cap
+  this is not a practical concern, but it is not a kernel-level limit.
+- Tasks are killed by process group, so a command that deliberately detaches itself
+  (`setsid`, `nohup … &`) escapes the kill.
+- Terminal state is recorded when the wrapper process exits, not when all descendants
+  exit: `cmd &` without `wait` ends the task while children keep running.
+
 ## Documentation
 
 - [User manual](docs/user-manual.md) — every command, mode and failure mode
