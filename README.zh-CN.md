@@ -1,6 +1,6 @@
 # pi-easy-bg
 
-给 [pi](https://pi.dev) 用的后台任务扩展：长命令不阻塞对话，结果自己回来——不用轮询，也不会抢走你正在做的事。
+给 [pi](https://pi.dev) 用的后台任务扩展：长命令不阻塞对话，任务完成后按需查看状态和日志。
 
 ```
 /easy-bg --name build make -j8
@@ -8,7 +8,7 @@
 
   ■ background [easy-bg] bg-3f9a2c "build" DONE exit=0 in 47s
     … 构建输出 …
-    /easy-bg now bg-3f9a2c   交给模型处理 · /easy-bg log bg-3f9a2c
+    /easy-bg ls · /easy-bg log bg-3f9a2c · /easy-bg now bg-3f9a2c（可选）
 ```
 
 ## 为什么
@@ -19,8 +19,8 @@ pi 内置的 `bash` 工具是同步的：一条命令独占整个 turn 直到返
 
 - **启动立即返回**，命令在独立进程组里跑。
 - **并行由 harness 负责**：一次调用起 N 个任务，一次 `status` 聚合返回。
-- **事件驱动**：任务结束自己上报，模型不需要轮询。
-- **结果不劫持你**：卡片只上屏（不进上下文、不附着到你下一个问题），投递要等你"空闲且静默"。
+- **结果可见但不主动唤醒模型**：完成后显示卡片，人或 agent 可主动检查状态和日志。
+- **默认不打断对话**：卡片不进模型上下文，不开启新 turn。只有明确选择 `now` 或 `watch` 才会自动唤醒模型。
 - **跨重启**：状态与日志落盘，后续 pi 会话可以接管仍在跑的任务。
 
 ## 安装
@@ -57,31 +57,15 @@ pi -e git:github.com/mattshen/pi-easy-bg
 
 ## 投递模式
 
-任务完成永远不会抢走对话。`park` 只把结果做成**只上屏**的卡片（不进模型上下文，也不附着到你下一个问题），随后 `auto` 在你停下来之后交给模型。
+默认 `park`：任务完成时只显示**只上屏**的卡片，不进入模型上下文，不附着到下一个问题，也不自动开启 turn。人可以用 `/easy-bg ls` 和 `/easy-bg log <id>` 查看；agent 在当前轮可主动调用 `easy_bg` 的 `status`、`results`（批量结果）或 `logs`。不要在同一轮里反复轮询。
 
 | `--notify` | 行为 |
 |---|---|
-| `auto`（默认） | 出卡片；用户在 `EASY_BG_QUIET_MS`（默认 8s）内保持空闲且静默后投递 |
-| `now` | 任务一结束就开 turn。只在"我就等这一个结果"时用 |
-| `park` | 只出卡片，永不自动投递，由你用 `/easy-bg now` 决定 |
-| `manual` | 什么都不做（连卡片都不出）。等同 `--no-notify` |
+| `park`（默认） | 只出卡片；按需检查状态/日志，或显式用 `/easy-bg now` 交给模型 |
+| `now` | 显式选择：任务一结束就开启模型 turn |
+| `manual` | 不显示卡片或消息；仍可检查状态/日志。等同 `--no-notify` |
 
-"空闲且静默"指下面三条**连续**成立满静默窗口：
-
-1. 没有 turn 在跑（不 streaming、不执行工具）；
-2. 没有排队消息（你没有连发第二条）；
-3. 编辑器为空（有草稿就不投递；纯空白算空）。
-
-结果进入模型上下文只有四条路径：
-
-| # | 路径 | 条件 |
-|---|---|---|
-| A | `--notify now` | 任务结束，无其它条件 |
-| B | `--notify auto` | 空闲静默窗口满 |
-| C | `/easy-bg now [id]` | 总是可用；模型忙时排队成一个**独立 turn** |
-| D | `--watch <pattern>` | 输出匹配（每任务一次） |
-
-投递永远开**独立 turn**（`sendUserMessage`），不会用 `followUp` 插进你当前正在进行的 turn。
+`/easy-bg now [id]` 可以主动把 parked 结果交给模型（模型忙时等空闲后投递）；`--watch <pattern>` 可以在输出命中时显式唤醒模型一次。只有 `now` 和 `watch` 会自动唤醒，不存在空闲自动投递。
 
 ## 任务状态
 
@@ -133,7 +117,7 @@ sys.exit(4)          # -> FAIL exit=4
 | `/easy-bg clear --all` | 清理所有会话的全部终态任务（含未处理结果） |
 | `/easy-bg help` | 用法 |
 
-选项：`--name <label>`、`--timeout <sec|0>`、`--watch <substring|/regex/flags>`、`--notify <auto|now|park|manual>`、`--no-notify`。
+选项：`--name <label>`、`--timeout <sec|0>`、`--watch <substring|/regex/flags>`、`--notify <park|now|manual>`、`--no-notify`。
 
 `<id>` 支持唯一前缀（`bg-3f`）；前缀不唯一时会列出候选而不是猜一个。
 
@@ -147,11 +131,12 @@ sys.exit(4)          # -> FAIL exit=4
 |---|---|
 | `run` | `command: string[]`（1..N，每个一项任务）、`name?`、`timeout?`、`watch?`、`notify?` |
 | `status` | —（本会话任务聚合） |
+| `results` | `tasks?`（最多 10 个 id/唯一前缀；省略则读本会话最近完成的 10 个任务）、`task?`（单个任务）、`lines?`（默认 30，每任务最多 100 行） |
 | `logs` | `task`（id 或唯一前缀）、`lines?`（默认 30，最大 400） |
 | `stop` | `task` |
 | `clear` | — |
 
-`run` 之后工具会提示模型结束本轮——结果自己回来。`pi --no-easy-bg-tool` 可隐藏该工具，只保留斜杠命令。
+`run` 之后模型可以继续做别的事或结束本轮。需要汇总多个任务时，模型在**当前轮**调用 `results`，一次取得各任务状态和日志，再自行回答；不会开启新 turn，也不会将任务标为已处理。显式指定 id 时可读运行中任务的部分输出或其他会话的任务；省略 id 只取本会话已完成任务。每任务最多返回 4000 字符日志，要看更多用 `logs`。如果模型已经结束本轮，需要新用户消息才能继续调用工具。`pi --no-easy-bg-tool` 可隐藏该工具，只保留斜杠命令。
 
 ## 配置
 
@@ -161,8 +146,7 @@ sys.exit(4)          # -> FAIL exit=4
 | 超时 | 600s（`0` = 不限） | `--timeout`、`EASY_BG_TIMEOUT_SEC` |
 | 输出上限 | 20 MiB | `EASY_BG_MAX_BYTES` |
 | 非 shebang 命令的 shell | `/bin/bash` | `EASY_BG_SHELL` |
-| 默认投递模式 | `auto` | `EASY_BG_NOTIFY` |
-| 自动投递前的静默窗口 | 8s | `EASY_BG_QUIET_MS` |
+| 默认投递模式 | `park` | `EASY_BG_NOTIFY`（`park`、`now`、`manual`） |
 | 并发任务上限 | 8 | 常量 |
 | 终态保留 | 7 天 / 50 条 | 常量 |
 | 隐藏模型工具 | 关 | `pi --no-easy-bg-tool` |
@@ -187,7 +171,7 @@ sys.exit(4)          # -> FAIL exit=4
 ```bash
 git clone https://github.com/mattshen/pi-easy-bg
 cd pi-easy-bg
-npm run verify                    # import check + 34 个单元测试，无需安装依赖（Node >= 22.18）
+npm run verify                    # import check + 单元测试，无需安装依赖（Node >= 22.18）
 pi -e .                           # 临时加载工作副本
 ```
 

@@ -2,7 +2,7 @@
  * pi-easy-bg — core logic (no pi imports; unit-testable)
  *
  * Everything here is plain Node: state files, ids, log tails, status resolution,
- * task spawning, watch patterns and formatting. The pi integration lives in
+ * task spawning, batch result selection, watch patterns and formatting. The pi integration lives in
  * `extensions/easy-bg.ts`.
  */
 
@@ -10,14 +10,14 @@
  * pi-easy-bg — background shell tasks for pi
  *
  * User interface:  /easy-bg (bare form = run)
- * Model interface: single tool `easy_bg` (action: run | status | logs | stop | clear)
+ * Model interface: single tool `easy_bg` (action: run | status | results | logs | stop | clear)
  *
  * Design goals:
  *  - Return immediately: the chat is never blocked by a long command
  *  - Parallelism lives in the harness: one run can start several tasks; one status returns all
- *  - Event-driven delivery: results arrive on their own, without model-side polling
- *  - Results never leak into unrelated turns: the card is display-only, delivery waits for
- *    an idle-and-quiet window (see NOTIFY modes below)
+ *  - Passive results: completed tasks show cards; status/results/logs are checked on demand
+ *  - Results never leak into unrelated turns by default: the card is display-only;
+ *    people or agents inspect status/logs explicitly (see NOTIFY modes below)
  *  - Persistent state: survives pi restarts and session switches (heartbeat + adoption)
  *  - Bounded output: per-task byte cap, process-group kill, ANSI-stripped tails
  *
@@ -33,7 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export const VERSION = "1.0.3";
+export const VERSION = "2.0.0";
 export const DEFAULT_TIMEOUT_SEC = Number(process.env.EASY_BG_TIMEOUT_SEC) || 600;
 export const DEFAULT_MAX_BYTES = Number(process.env.EASY_BG_MAX_BYTES) || 20 * 1024 * 1024;
 export const MAX_RUNNING_TASKS = 8;
@@ -46,8 +46,8 @@ export const LEASE_MS = 5000;
 export const ADOPT_STALE_MS = 20000;
 export const TAIL_BYTES = 64 * 1024;
 export const NOTIFY_TAIL_LINES = 20;
-// auto 模式：只有在“用户空闲且静默”持续这么久之后才主动 report，避免打断/污染用户正在做的 foreground 任务
-export const QUIET_MS = Number(process.env.EASY_BG_QUIET_MS) || 8000;
+export const MAX_RESULT_TASKS = 10;
+export const RESULT_LOG_CHARS = 4000;
 // 内存去重账本上限。它只是“同一进程内”的防抖；权威去重依据是磁盘上的 task.notified，
 // 所以到顶时整体清空是安全的（最坏情况只是多走一次已处理判断），但可防单调增长。
 export const NOTIFY_KEYS_MAX = 5000;
@@ -55,11 +55,12 @@ export const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 
 export type TaskStatus = "running" | "done" | "failed" | "killed" | "timeout" | "output_cap" | "exited";
 export type KillReason = "user" | "timeout" | "output_cap";
-export type NotifyMode = "auto" | "now" | "park" | "manual";
+export type NotifyMode = "now" | "park" | "manual";
 
-export const NOTIFY_MODES: NotifyMode[] = ["auto", "now", "park", "manual"];
-// auto = 不打断前台：安全边界才投递；now = 完成即开 turn；park = 永远等你 /easy-bg now；manual = 完全不进上下文
-export const DEFAULT_NOTIFY: NotifyMode = NOTIFY_MODES.includes((process.env.EASY_BG_NOTIFY ?? "") as NotifyMode) ? (process.env.EASY_BG_NOTIFY as NotifyMode) : "auto";
+export const NOTIFY_MODES: NotifyMode[] = ["now", "park", "manual"];
+// now = 完成即开 turn；park = 默认只上屏，等待主动检查；manual = 不显示卡片
+// 旧配置 EASY_BG_NOTIFY=auto 回退到 park；旧任务记录中的 auto 也在 modeOf 中按 park 处理。
+export const DEFAULT_NOTIFY: NotifyMode = NOTIFY_MODES.includes((process.env.EASY_BG_NOTIFY ?? "") as NotifyMode) ? (process.env.EASY_BG_NOTIFY as NotifyMode) : "park";
 
 export interface Task {
 	id: string;
@@ -379,6 +380,28 @@ export function ambiguousIn(all: Task[], ref: string): Task[] {
 	const q = (ref ?? "").trim();
 	if (!q) return [];
 	return all.filter((t) => t.id.startsWith(q) || (t.name ?? "").startsWith(q));
+}
+
+// 批量读取：显式 id/唯一前缀可跨会话；省略 id 时取本会话最近结束的任务。
+// 不修改任务状态，agent 可以按需重读；默认限制数量，避免旧任务挤满上下文。
+export function selectResultTasks(all: Task[], sid: string, refs?: string[]): { tasks: Task[]; omitted: number; error?: string } {
+	if (refs?.length) {
+		if (refs.length > MAX_RESULT_TASKS) return { tasks: [], omitted: 0, error: `results accepts at most ${MAX_RESULT_TASKS} task ids` };
+		const selected: Task[] = [];
+		const seen = new Set<string>();
+		for (const raw of refs) {
+			const ref = raw.trim();
+			if (!ref) return { tasks: [], omitted: 0, error: "results needs non-empty task ids" };
+			const matches = ambiguousIn(all, ref);
+			if (matches.length > 1) return { tasks: [], omitted: 0, error: `ambiguous task "${ref}": ${matches.map((t) => t.id).join(", ")}` };
+			if (!matches.length) return { tasks: [], omitted: 0, error: `no such task: ${ref}` };
+			if (!seen.has(matches[0].id)) { selected.push(matches[0]); seen.add(matches[0].id); }
+		}
+		return { tasks: selected, omitted: 0 };
+	}
+	const finished = all.filter((t) => t.session === sid && isTerminal(t.status))
+		.sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt));
+	return { tasks: finished.slice(-MAX_RESULT_TASKS), omitted: Math.max(0, finished.length - MAX_RESULT_TASKS) };
 }
 
 // 按 id / 唯一前缀 / name 查找；空引用返回本会话最近一个任务

@@ -11,7 +11,7 @@
  * deterministic) and asserts on the persistent state plus the extension's own events:
  *
  *   done / failed / timeout / output_cap / killed / exited-by-`set -e` / shebang exit code
- *   park (auto keeps an unhandled result)  ·  manual (marks it handled)
+ *   default park (even with legacy EASY_BG_NOTIFY=auto)  ·  manual (marks it handled)
  *   clear (keeps running tasks and unhandled results)  ·  clear --all
  *   no `extension_error` on any event
  *
@@ -53,7 +53,7 @@ function check(name, ok, detail) {
 
 const child = spawn("pi", ["-ne", "-e", repo, "--mode", "rpc", "--no-session"], {
 	cwd: workDir,
-	env: { ...process.env, EASY_BG_DIR: stateDir, EASY_BG_QUIET_MS: "999999", EASY_BG_MAX_BYTES: String(MAX_BYTES) },
+	env: { ...process.env, EASY_BG_DIR: stateDir, EASY_BG_NOTIFY: "auto", EASY_BG_QUIET_MS: "100", EASY_BG_MAX_BYTES: String(MAX_BYTES) },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -157,8 +157,14 @@ try {
 	check("--notify manual marks the result handled without a card", Boolean(byName("manual")?.handledAt));
 
 	const parked = await waitFor("parked", () => (byName("parked")?.parkedAt ? byName("parked") : undefined));
-	check("auto parks the result without delivering it", Boolean(parked.parkedAt) && !parked.handledAt);
+	check("legacy auto config falls back to default park without delivery", Boolean(parked.parkedAt) && !parked.handledAt);
+	send("/easy-bg --name rejected --notify auto echo should-not-run");
+	await waitFor("invalid notify warning", () => events.some((e) => JSON.stringify(e).includes('invalid notify mode')));
+	check("removed --notify auto is rejected", !byName("rejected"));
 	check("park shows a display-only card", events.some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg-result"));
+	// Old auto would have delivered after 100ms (+ one tick); parked results must stay passive.
+	await new Promise((r) => setTimeout(r, 3_200));
+	check("park stays unhandled after idle time", !byName("parked")?.handledAt);
 
 	// start the long-running task only now, so the 8-task limit is never hit
 	send("/easy-bg --name kill sleep 30");
@@ -169,8 +175,8 @@ try {
 	check("stop -> KILLED", killed.status === "killed");
 
 	// `clear` is conservative by design: it keeps running tasks, unhandled results and
-	// other sessions. In auto mode every finished task is an unhandled result, so the only
-	// thing it may drop here is the `--notify manual` one (already handled).
+	// other sessions. In park mode finished tasks remain unhandled until explicit delivery;
+	// the `--notify manual` task is already handled.
 	const unhandledBefore = tasks().filter((t) => t.parkedAt && !t.handledAt).map((t) => t.name).sort();
 	send("/easy-bg --name keepalive sleep 30");
 	await waitFor("keepalive", () => byName("keepalive")?.status === "running");

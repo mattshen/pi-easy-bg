@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import {
 	ANSI,
+	DEFAULT_NOTIFY,
+	MAX_RESULT_TASKS,
+	NOTIFY_MODES,
 	STATUS_LABEL,
 	ambiguousIn,
 	compileWatch,
@@ -16,6 +19,7 @@ import {
 	nextId,
 	readExitCode,
 	resolveTerminal,
+	selectResultTasks,
 	truncateTail,
 	startTask,
 	summaryLine,
@@ -74,6 +78,11 @@ function writeExit(id: string, code: number): void {
 // ---------------------------------------------------------------------------
 
 describe("status model", () => {
+	test("park is the default and auto is not a supported mode", () => {
+		assert.equal(DEFAULT_NOTIFY, "park");
+		assert.deepEqual(NOTIFY_MODES, ["now", "park", "manual"]);
+	});
+
 	test("isTerminal is false only for running", () => {
 		const terminal: TaskStatus[] = ["done", "failed", "killed", "timeout", "output_cap", "exited"];
 		assert.equal(isTerminal("running"), false);
@@ -283,6 +292,49 @@ describe("ambiguousIn / findTask", () => {
 	test("empty reference prefers the caller's own session", () => {
 		assert.equal(findTask(tasks, "", "s2")?.session, "s2");
 		assert.equal(findTask(tasks, "", "s1")?.session, "s1");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// batch results (selection only; read-only)
+// ---------------------------------------------------------------------------
+
+describe("selectResultTasks", () => {
+	const tasks = [
+		makeTask({ id: "bg-aaaaaa", status: "done", session: "s1", endedAt: 100, parkedAt: 101 }),
+		makeTask({ id: "bg-aaaabb", status: "failed", session: "s1", endedAt: 200, parkedAt: 201 }),
+		makeTask({ id: "bg-cccccc", status: "running", session: "s1" }),
+		makeTask({ id: "bg-dddddd", status: "done", session: "s2", endedAt: 300 }),
+	];
+
+	test("default returns completed tasks in this session without mutating them", () => {
+		const original = structuredClone(tasks);
+		const selected = selectResultTasks(tasks, "s1");
+		assert.deepEqual(selected.tasks.map((t) => t.id), ["bg-aaaaaa", "bg-aaaabb"]);
+		assert.equal(selected.omitted, 0);
+		assert.deepEqual(tasks, original);
+		assert.equal(selected.tasks[0].handledAt, undefined);
+	});
+
+	test("explicit ids include running or cross-session tasks, deduplicated", () => {
+		const selected = selectResultTasks(tasks, "s1", ["bg-cccc", "bg-ddd", "bg-cccc"]);
+		assert.deepEqual(selected.tasks.map((t) => t.id), ["bg-cccccc", "bg-dddddd"]);
+	});
+
+	test("ambiguous, unknown and empty ids fail rather than returning other results", () => {
+		assert.match(selectResultTasks(tasks, "s1", ["bg-aaaa"]).error ?? "", /ambiguous/);
+		assert.match(selectResultTasks(tasks, "s1", ["bg-missing"]).error ?? "", /no such task/);
+		assert.match(selectResultTasks(tasks, "s1", [" "]).error ?? "", /non-empty/);
+	});
+
+	test("default caps older results and explicit requests have a limit", () => {
+		const many = Array.from({ length: MAX_RESULT_TASKS + 2 }, (_, i) =>
+			makeTask({ id: `bg-${String(i).padStart(6, "0")}`, status: "done", endedAt: i, session: "s1" }));
+		const selected = selectResultTasks(many, "s1");
+		assert.equal(selected.tasks.length, MAX_RESULT_TASKS);
+		assert.equal(selected.tasks[0].id, "bg-000002");
+		assert.equal(selected.omitted, 2);
+		assert.match(selectResultTasks(many, "s1", many.map((t) => t.id)).error ?? "", /at most/);
 	});
 });
 

@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-21
+
+### Added
+
+- Model tool `action=results` reads up to 10 tasks (or the latest finished tasks
+  in this session) in one call, including status, exit code, and bounded log tails.
+  It is read-only: no new turn and no change to handled/parked state.
+
+### Changed
+
+- Removed `auto` delivery and its quiet-window setting. Completed tasks now default to
+  `park`: a display-only card, with no automatic model turn. People can check with
+  `/easy-bg ls` and `/easy-bg log`; agents can use `status` and `logs` when needed.
+- `--notify now` and `--watch` remain explicit opt-ins for automatic wake-ups.
+  Old `EASY_BG_NOTIFY=auto` settings and persisted `auto` tasks behave as `park`.
+  `/easy-bg --notify auto` is rejected.
+- The model-facing `clear` action now preserves unhandled parked results, like
+  `/easy-bg clear`.
+
 ## [1.0.3] - 2026-10-18
 
 ### Added

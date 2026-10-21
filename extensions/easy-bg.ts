@@ -18,10 +18,11 @@ import {
 	DEFAULT_TIMEOUT_SEC,
 	LEASE_MS,
 	MAX_RUNNING_TASKS,
+	MAX_RESULT_TASKS,
+	RESULT_LOG_CHARS,
 	NOTIFY_KEYS_MAX,
 	NOTIFY_MODES,
 	NOTIFY_TAIL_LINES,
-	QUIET_MS,
 	RETENTION_COUNT,
 	RETENTION_MS,
 	STATUS_LABEL,
@@ -42,6 +43,7 @@ import {
 	readExitCode,
 	readTasks,
 	resolveTerminal,
+	selectResultTasks,
 	startTask,
 	summaryLine,
 	tailText,
@@ -74,8 +76,6 @@ export default function (pi: ExtensionAPI) {
 	};
 	let lastStatusLine: string | undefined;
 	let gcAt = 0;
-	// 连续“安全”的起始时刻；任何一次不安全（输出中 / 有排队消息 / 编辑器非空）都会清零
-	let quietSince = 0;
 
 	const startContext = (ctx: ExtensionContext): StartContext => ({
 		cwd: ctx.cwd,
@@ -94,20 +94,8 @@ export default function (pi: ExtensionAPI) {
 
 	const modeOf = (t: Task): NotifyMode => {
 		if (t.notify === false) return "manual";
+		if (t.notifyMode && !NOTIFY_MODES.includes(t.notifyMode)) return "park"; // legacy auto tasks stay passive
 		return t.notifyMode ?? DEFAULT_NOTIFY;
-	};
-
-	// 安全边界 = 代理空闲 + 无排队消息 + 编辑器里没有你正在写的东西
-	const safeBoundary = (ctx: ExtensionContext): boolean => {
-		try {
-			return ctx.isIdle() && !ctx.hasPendingMessages() && !((ctx.ui.getEditorText?.() ?? "").trim());
-		} catch {
-			try {
-				return ctx.isIdle();
-			} catch {
-				return false;
-			}
-		}
 	};
 
 	const openTurn = (text: string, ctx: ExtensionContext): boolean => {
@@ -141,7 +129,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	// flush：把 parked 的结果开一个 turn 交给你（/easy-bg now，或 auto 在安全边界自动触发）
+	// flush：仅在用户显式 /easy-bg now 时，把 parked 结果交给模型
 	const flushParked = (ctx: ExtensionContext, filter?: (t: Task) => boolean): number => {
 		const sid = ctx.sessionManager.getSessionId();
 		const pending = readTasks().filter((t) => t.session === sid && isTerminal(t.status) && t.notified && t.parkedAt && !t.handledAt && (!filter || filter(t)));
@@ -160,7 +148,7 @@ export default function (pi: ExtensionAPI) {
 	const renderStatus = (ctx: ExtensionContext, tasks: Task[]) => {
 		const running = tasks.filter((t) => t.status === "running");
 		const fresh = tasks.filter((t) => isTerminal(t.status) && t.endedAt && Date.now() - t.endedAt < 10 * 60 * 1000);
-		const parked = tasks.filter((t) => t.parkedAt && !t.handledAt && modeOf(t) === "auto");
+		const parked = tasks.filter((t) => t.parkedAt && !t.handledAt);
 		// 状态词与 ls/log 保持一致：运行中也显示 RUNNING；计时跟在状态后，终态带 exit code
 		const fmt = (t: Task, withTime: boolean) =>
 			`${t.id} ${STATUS_LABEL[t.status]}${withTime ? ` ${elapsed(t)}` : (t.status === "done" || t.status === "failed") && t.exitCode !== undefined ? ` exit=${t.exitCode}` : ""}${t.status === "running" && t.killReason ? ` \u2192${t.killReason}` : ""}`;
@@ -298,27 +286,12 @@ export default function (pi: ExtensionAPI) {
 				const cur = all.find((x) => x.id === t.id);
 				if (cur) { cur.notified = true; if (ok) cur.parkedAt = Date.now(); }
 			});
-			if (ctx.hasUI) ctx.ui.notify(`${live.id} ${STATUS_LABEL[live.status]} — 已上屏，不进上下文；空闲 ${Math.round(QUIET_MS / 1000)}s 后自动处理，或 /easy-bg now 立即处理`, "info");
+			if (ctx.hasUI) ctx.ui.notify(`${live.id} ${STATUS_LABEL[live.status]} — 已上屏，不进上下文；用 /easy-bg ls、log 检查，或 /easy-bg now 交给模型`, "info");
 		}
 
-		// auto：必须是“用户空闲且已静默 QUIET_MS”才主动 report。
-		// 静默窗口是关键：turn 刚结束的瞬间用户往往正在敲下一条消息，此时注入等于抢麦。
-		// 用户显式 /easy-bg now 过的结果：一旦 idle 且无排队消息就立刻投递（不等静默窗口）
-		const wantedNow = readTasks().filter((t) => t.session === sid && t.parkedAt && !t.handledAt && t.wantedAt);
-		let wantedFlushed = false;
-		if (wantedNow.length > 0 && ctx.isIdle() && !ctx.hasPendingMessages()) {
-			wantedFlushed = flushParked(ctx, (t) => !!t.wantedAt) > 0;
-		}
-		const parked = readTasks().filter((t) => t.session === sid && t.parkedAt && !t.handledAt && modeOf(t) === "auto");
-		const safe = safeBoundary(ctx);
-		if (wantedFlushed) quietSince = Date.now();
-		if (!safe || parked.length === 0) {
-			quietSince = 0;
-		} else {
-			if (!quietSince) quietSince = Date.now();
-			if (Date.now() - quietSince >= QUIET_MS) {
-				if (flushParked(ctx) > 0) quietSince = Date.now();
-			}
+		// 只有显式 /easy-bg now 曾排队的结果，才在 agent 空闲后投递。
+		if (ctx.isIdle() && !ctx.hasPendingMessages()) {
+			flushParked(ctx, (t) => !!t.wantedAt);
 		}
 
 		if (now - gcAt > 5 * 60 * 1000) {
@@ -379,14 +352,15 @@ export default function (pi: ExtensionAPI) {
 	// ---- 模型侧：单个 action-based tool（弱并行模型也只需顺序调用）----
 	if (!pi.getFlag("no-easy-bg-tool")) {
 		const params = Type.Object({
-			action: Type.Union([Type.Literal("run"), Type.Literal("status"), Type.Literal("logs"), Type.Literal("stop"), Type.Literal("clear")], { description: "run: start a task and return immediately; status: list tasks; logs: tail a task log; stop: kill a task group; clear: drop finished records" }),
+			action: Type.Union([Type.Literal("run"), Type.Literal("status"), Type.Literal("results"), Type.Literal("logs"), Type.Literal("stop"), Type.Literal("clear")], { description: "run: start tasks; status: list tasks; results: read up to 10 tasks and their output in this turn (no new turn); logs: tail one task; stop: kill a task; clear: drop handled finished records" }),
 			command: Type.Optional(Type.Array(Type.String(), { description: "For action=run: one or more shell commands. Each command becomes its own background task (parallelism handled here, not by issuing parallel calls)." })),
 			name: Type.Optional(Type.String({ description: "Optional short label for the task" })),
-			task: Type.Optional(Type.String({ description: "Task id (e.g. bg-1) for logs/stop" })),
-			lines: Type.Optional(Type.Number({ description: "Log lines to return (default 30, max 400)" })),
+			task: Type.Optional(Type.String({ description: "Task id (e.g. bg-1) for logs/stop, or one result" })),
+			tasks: Type.Optional(Type.Array(Type.String(), { description: `For results: task ids or unique prefixes (up to ${MAX_RESULT_TASKS}). Omit to read the latest finished tasks in this session.` })),
+			lines: Type.Optional(Type.Number({ description: "Log lines to return (default 30; max 400 for logs, 100 per task for results)" })),
 			timeout: Type.Optional(Type.Number({ description: `Kill after N seconds (default ${DEFAULT_TIMEOUT_SEC}; 0 = no timeout)` })),
-			watch: Type.Optional(Type.String({ description: "Wake the chat when output matches this substring or /regex/flags (once)" })),
-			notify: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("now"), Type.Literal("park"), Type.Literal("manual")], { description: "auto (default): show a display-only card, then deliver the result only after the user has been idle and quiet for a few seconds (never injected into an unrelated turn). now: start a turn the moment it finishes. park: card only, wait for /easy-bg now. manual: nothing." })),
+			watch: Type.Optional(Type.String({ description: "Explicitly wake the chat when output matches this substring or /regex/flags (once)" })),
+			notify: Type.Optional(Type.Union([Type.Literal("park"), Type.Literal("now"), Type.Literal("manual")], { description: "park (default): display-only result card; inspect with status/logs or /easy-bg ls/log, or explicitly hand it to the model with /easy-bg now. now: start a turn when the task finishes (opt-in). manual: no card or message." })),
 		});
 
 		pi.registerTool(
@@ -394,12 +368,12 @@ export default function (pi: ExtensionAPI) {
 				name: "easy_bg",
 				label: "Background task",
 				description:
-					"Run shell commands in the background without blocking the chat. Use for anything longer than ~10 seconds (builds, test suites, fetches, watchers). One run call can start several commands at once. After run, END YOUR TURN: the finished result is delivered back to you automatically (default mode auto parks the result and opens a turn for it when the chat is idle). Do NOT wait for it: never call bash with sleep/tail, and do not call status or logs in a loop, because that blocks the chat you just freed. Leave notify at its default (auto) unless the user only waits for that one task. To react to a specific output line, use the watch parameter instead of putting markers into the command.",
-				promptSnippet: "Start and monitor background shell tasks (build, test, fetch, watch) without blocking the conversation",
+					"Run shell commands in the background without blocking the chat. Use for anything longer than ~10 seconds (builds, test suites, fetches, watchers). One run call can start several commands at once. By default a completed task shows a display-only card; it NEVER starts a model turn or enters the model context automatically. Check completion with action=status, or use action=results to read up to 10 tasks and their logs in one tool response and summarize them in this turn. Omit tasks to read the latest finished tasks in this session; pass tasks to select specific ids (including running tasks). Results is read-only: it never starts a turn or marks results handled. Humans can inspect with /easy-bg ls and /easy-bg log. Do not block the chat by waiting or polling in a loop. Only use notify=now or watch when the user explicitly wants an automatic wake-up.",
+				promptSnippet: "Start background shell tasks; inspect completion and logs explicitly (no automatic turn by default)",
 				promptGuidelines: [
 					"Prefer easy_bg over bash for commands that take more than ~10 seconds.",
-					"After easy_bg run, end your turn immediately. Do not sleep, tail, poll status, or read the task log in the same turn - the completion result comes back to you on its own (mode auto parks it, then a turn opens when idle).",
-					"When the parked result arrives, that is your signal to analyse it and answer (for example: compare the collected data and give a recommendation).",
+					"After easy_bg run, do other useful work or end your turn. Do not sleep/tail/poll in a loop; by default results are parked and never open a model turn automatically.",
+					"When asked to summarize multiple background tasks, use action=results with tasks=[ids] to read their statuses and output in one call, then synthesize an answer in this same turn. For a quick check use status; for a longer single log use logs. None of these open another turn.",
 				],
 				parameters: params,
 				prepareArguments: (raw: any) => {
@@ -411,6 +385,7 @@ export default function (pi: ExtensionAPI) {
 					if (command !== undefined) {
 						out.command = Array.isArray(command) ? command.map(String) : [String(command)];
 					}
+					if (args.tasks !== undefined) out.tasks = Array.isArray(args.tasks) ? args.tasks.map(String) : [String(args.tasks)];
 					for (const key of ["name", "task", "watch", "notify"] as const) if (args[key] !== undefined) out[key] = String(args[key]);
 					const id = args.task ?? args.id;
 					if (id !== undefined) out.task = String(id);
@@ -431,7 +406,7 @@ export default function (pi: ExtensionAPI) {
 						if (readTasks().filter((t) => t.status === "running").length + commands.length > MAX_RUNNING_TASKS) return fail(`task limit is ${MAX_RUNNING_TASKS} running; stop one first`);
 						try {
 							const created = commands.map((c, i) => startTask(startContext(ctx), { command: c, name: args.name && commands.length === 1 ? args.name : args.name ? `${args.name}-${i + 1}` : undefined, timeoutSec: args.timeout, watch: args.watch, notifyMode: args.notify as NotifyMode | undefined }, sid));
-							const text = created.map((t) => `${t.id} RUNNING: ${t.command.replace(/\s*\n\s*/g, " \u23ce ").slice(0, 160)} (log: ${logPath(t)})`).join("\n") + `\nStarted ${created.length} task(s). END YOUR TURN now - ${created.length === 1 ? "it" : "they"} will report back when done${created.some((t) => modeOf(t) === "auto") ? " (parked, delivered when the chat is idle)" : ""}. Do not sleep/tail/poll in this turn.`;
+							const text = created.map((t) => `${t.id} RUNNING: ${t.command.replace(/\s*\n\s*/g, " \u23ce ").slice(0, 160)} (log: ${logPath(t)})`).join("\n") + `\nStarted ${created.length} task(s). By default, completion only shows a card; check later with action=status/logs or ask the user to use /easy-bg ls/log. No automatic model turn. Do not wait or poll in a loop.`;
 							return { content: [{ type: "text" as const, text }], details: { ids: created.map((t) => t.id) } };
 						} catch (error: any) {
 							return fail(error?.message ?? String(error));
@@ -447,6 +422,25 @@ export default function (pi: ExtensionAPI) {
 							return `${summaryLine(t)}\n   log: ${logPath(t)}${detail ? `\n   last: ${detail}` : ""}`;
 						});
 						return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { tasks: mine.map((t) => ({ id: t.id, status: t.status, exitCode: t.exitCode ?? null, elapsed: elapsed(t), log: logPath(t) })) } };
+					}
+
+					if (args.action === "results") {
+						const refs = args.tasks?.length ? args.tasks : args.task ? [args.task] : undefined;
+						const selection = selectResultTasks(readTasks(), sid, refs);
+						if (selection.error) return fail(selection.error);
+						if (!selection.tasks.length) return { content: [{ type: "text" as const, text: "no finished easy-bg tasks in this session; use action=status to check running tasks" }], details: { tasks: [] } };
+						const n = Math.min(Math.max(Math.trunc(args.lines ?? 30) || 30, 1), 100);
+						const blocks = selection.tasks.map((t) => {
+							const tail = tailText(t, n);
+							const clipped = tail.length > RESULT_LOG_CHARS;
+							const output = clipped ? `… (earlier output omitted; use action=logs for more)\n${tail.slice(-RESULT_LOG_CHARS)}` : tail || "(no output)";
+							return `${summaryLine(t)}\nlog: ${logPath(t)}\n${output}`;
+						});
+						if (selection.omitted) blocks.push(`… ${selection.omitted} older finished task(s) omitted; pass tasks=[ids] to select them.`);
+						return {
+							content: [{ type: "text" as const, text: blocks.join("\n\n") }],
+							details: { tasks: selection.tasks.map((t) => ({ id: t.id, status: t.status, exitCode: t.exitCode ?? null, log: logPath(t) })), omitted: selection.omitted },
+						};
 					}
 
 					if (args.action === "logs") {
@@ -470,10 +464,18 @@ export default function (pi: ExtensionAPI) {
 						return { content: [{ type: "text" as const, text: `sent SIGTERM to ${t.id} process group` }], details: { id: t.id } };
 					}
 
+					let cleared = 0;
 					withTasks((all) => {
-						for (let i = all.length - 1; i >= 0; i--) if (isTerminal(all[i].status)) { fs.rmSync(taskDir(all[i].id), { recursive: true, force: true }); all.splice(i, 1); }
+						for (let i = all.length - 1; i >= 0; i--) {
+							const t = all[i];
+							if (!isTerminal(t.status) || t.session !== sid || (t.parkedAt && !t.handledAt)) continue;
+							forget(t.id, t.startedAt);
+							fs.rmSync(taskDir(t.id), { recursive: true, force: true });
+							all.splice(i, 1);
+							cleared++;
+						}
 					});
-					return { content: [{ type: "text" as const, text: "cleared finished tasks" }], details: {} };
+					return { content: [{ type: "text" as const, text: `${cleared} finished task(s) cleared; unhandled parked results and running tasks kept` }], details: { cleared } };
 				},
 			}),
 		);
@@ -483,6 +485,7 @@ export default function (pi: ExtensionAPI) {
 
 	function parseRunArgs(input: string) {
 		const opts: { name?: string; timeoutSec?: number; watch?: string; notify: boolean; notifyMode?: NotifyMode } = { timeoutSec: DEFAULT_TIMEOUT_SEC, notify: true };
+		let error: string | undefined;
 		let rest = input.trim();
 		for (;;) {
 			const m = rest.match(/^--(name|timeout|watch|notify)[=\s]+(\S+)\s*/);
@@ -490,7 +493,10 @@ export default function (pi: ExtensionAPI) {
 				rest = rest.slice(m[0].length).trim();
 				if (m[1] === "name") opts.name = m[2];
 				else if (m[1] === "timeout") opts.timeoutSec = Math.max(0, Number.parseInt(m[2], 10) || 0);
-				else if (m[1] === "notify") opts.notifyMode = NOTIFY_MODES.includes(m[2] as NotifyMode) ? (m[2] as NotifyMode) : "auto";
+				else if (m[1] === "notify") {
+					if (NOTIFY_MODES.includes(m[2] as NotifyMode)) opts.notifyMode = m[2] as NotifyMode;
+					else error = `invalid notify mode "${m[2]}"; choose park, now or manual`;
+				}
 				else opts.watch = m[2];
 				continue;
 			}
@@ -501,7 +507,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			break;
 		}
-		return { opts, command: rest };
+		return { opts, command: rest, error };
 	}
 
 	function stopById(ref: string, sid: string): string {
@@ -634,9 +640,10 @@ export default function (pi: ExtensionAPI) {
 						"/easy-bg ls                        list tasks",
 						"/easy-bg log <id> [lines]          tail a task log",
 						"/easy-bg stop <id>                 kill a task process group",
-						"/easy-bg now [id]                hand parked results to the model now",
-						"auto (default): result card is display-only (never injected into your next turn); the model is asked to handle it only after you have been idle and quiet for QUIET_MS (default 8s)",
-						"notify modes (auto|now|park|manual) via --notify; EASY_BG_NOTIFY sets the default, EASY_BG_QUIET_MS tunes the quiet window",
+						"/easy-bg now [id]                explicitly hand parked results to the model",
+						"agent tool: easy_bg action=results tasks=[ids] reads multiple results in the current turn; no /easy-bg results command",
+						"park (default): result card only; check with /easy-bg ls/log or easy_bg status/logs; never opens a model turn automatically",
+						"notify modes (park|now|manual) via --notify; EASY_BG_NOTIFY sets the default",
 						"/easy-bg clear                     drop finished tasks of THIS session (keeps unhandled results)",
 						"/easy-bg clear --all               drop every finished task, all sessions, including unhandled results",
 						`ids look like bg-3f9a2c; stop / log accept a unique prefix (bg-3f)`,
@@ -648,7 +655,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const runInput = sub === "run" ? input.slice(head.length).trim() : input;
-			const { opts, command } = parseRunArgs(runInput);
+			const { opts, command, error } = parseRunArgs(runInput);
+			if (error) {
+				ctx.ui.notify(error, "warning");
+				return;
+			}
 			if (!command) {
 				ctx.ui.notify("usage: /easy-bg [--name X] [--timeout 0] [--watch re] <command>", "warning");
 				return;
@@ -678,7 +689,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
-			ctx.ui.notify(`easy-bg v${VERSION} · /easy-bg help · notify: auto|now|park|manual`, "info");
+			ctx.ui.notify(`easy-bg v${VERSION} · /easy-bg help · notify: park|now|manual`, "info");
 		} catch {
 			/* ignore */
 		}
