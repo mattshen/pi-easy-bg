@@ -1,7 +1,7 @@
 {
   "name": "pi-easy-bg",
   "version": "3.0.0",
-  "description": "Background shell tasks for pi: start long commands without blocking the chat, and get results back without polling or losing your place.",
+  "description": "Background shell tasks for pi: start long commands without blocking the chat, then inspect or handle results on demand.",
   "keywords": [
     "pi-package",
     "pi",

@@ -6,19 +6,16 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import {
 	ANSI,
-	DEFAULT_NOTIFY,
 	MAX_HANDLE_TASKS,
-	NOTIFY_MODES,
 	STATUS_LABEL,
 	acknowledgeTasks,
 	ambiguousIn,
-	compileWatch,
 	elapsed,
 	findTask,
-	footerTasks,
 	isTerminal,
 	killTask,
 	nextId,
+	readTasks,
 	readExitCode,
 	resolveTerminal,
 	selectHandleTasks,
@@ -58,7 +55,6 @@ function makeTask(over: Partial<Task> = {}): Task {
 		status: "running",
 		timeoutSec: 60,
 		maxBytes: 1024 * 1024,
-		notify: true,
 		...over,
 	};
 	return t;
@@ -81,11 +77,6 @@ function writeExit(id: string, code: number): void {
 // ---------------------------------------------------------------------------
 
 describe("status model", () => {
-	test("park is the default and auto is not a supported mode", () => {
-		assert.equal(DEFAULT_NOTIFY, "park");
-		assert.deepEqual(NOTIFY_MODES, ["now", "park", "manual"]);
-	});
-
 	test("isTerminal is false only for running", () => {
 		const terminal: TaskStatus[] = ["done", "failed", "killed", "timeout", "output_cap", "exited"];
 		assert.equal(isTerminal("running"), false);
@@ -97,36 +88,6 @@ describe("status model", () => {
 		assert.deepEqual(Object.keys(STATUS_LABEL).sort(), [...statuses].sort());
 		assert.equal(STATUS_LABEL.running, "RUNNING");
 		assert.equal(STATUS_LABEL.output_cap, "OUTPUT_CAP");
-	});
-});
-
-// ---------------------------------------------------------------------------
-// watch patterns
-// ---------------------------------------------------------------------------
-
-describe("compileWatch", () => {
-	test("plain text is a literal substring, not a regex", () => {
-		const re = compileWatch("a.b(c");
-		assert.ok(re.test("xx a.b(c yy"));
-		assert.equal(re.test("aXb(c"), false);
-	});
-
-	test("slash form is a regex", () => {
-		const re = compileWatch("/err(or)?/i");
-		assert.ok(re.test("ERROR: boom"));
-		assert.equal(re.test("nothing"), false);
-	});
-
-	test("stateful flags are dropped so repeated tests stay stable", () => {
-		const re = compileWatch("/boom/g");
-		assert.equal(re.flags.includes("g"), false);
-		assert.equal(re.test("boom"), true);
-		assert.equal(re.test("boom"), true);
-	});
-
-	test("duplicate or invalid flags do not throw", () => {
-		assert.doesNotThrow(() => compileWatch("/boom/ii"));
-		assert.doesNotThrow(() => compileWatch("/boom/zz"));
 	});
 });
 
@@ -299,25 +260,31 @@ describe("ambiguousIn / findTask", () => {
 });
 
 // ---------------------------------------------------------------------------
-// batch handling and footer lifecycle
+// batch handling
 // ---------------------------------------------------------------------------
 
 describe("selectHandleTasks", () => {
 	const tasks = [
-		makeTask({ id: "bg-aaaaaa", status: "done", session: "s1", endedAt: 100, parkedAt: 101 }),
-		makeTask({ id: "bg-aaaabb", status: "failed", session: "s1", endedAt: 200, parkedAt: 201 }),
+		makeTask({ id: "bg-aaaaaa", status: "done", session: "s1", endedAt: 100 }),
+		makeTask({ id: "bg-aaaabb", status: "failed", session: "s1", endedAt: 200 }),
 		makeTask({ id: "bg-cccccc", status: "running", session: "s1" }),
 		makeTask({ id: "bg-dddddd", status: "done", session: "s2", endedAt: 300 }),
-		makeTask({ id: "bg-eeeeee", status: "done", session: "s1", endedAt: 400, parkedAt: 401, handledAt: 450 }),
+		makeTask({ id: "bg-eeeeee", status: "done", session: "s1", endedAt: 400, handledAt: 450 }),
 	];
 
-	test("default returns only pending parked tasks in this session without mutating them", () => {
+	test("default returns unhandled finished tasks in this session without mutating them", () => {
 		const original = structuredClone(tasks);
 		const selected = selectHandleTasks(tasks, "s1");
 		assert.deepEqual(selected.tasks.map((t) => t.id), ["bg-aaaaaa", "bg-aaaabb"]);
 		assert.equal(selected.omitted, 0);
 		assert.deepEqual(tasks, original);
 		assert.equal(selected.tasks[0].handledAt, undefined);
+	});
+
+	test("old stored notification fields do not gate handling", () => {
+		const legacy = { ...makeTask({ id: "bg-legacy", status: "done", session: "s1", endedAt: 50 }), notify: false, notified: true, notifyMode: "manual" };
+		fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify([legacy]));
+		assert.deepEqual(selectHandleTasks(readTasks(), "s1").tasks.map((t) => t.id), ["bg-legacy"]);
 	});
 
 	test("explicit ids include running or cross-session tasks, deduplicated", () => {
@@ -333,7 +300,7 @@ describe("selectHandleTasks", () => {
 
 	test("default caps pending results oldest first; explicit requests have a limit", () => {
 		const many = Array.from({ length: MAX_HANDLE_TASKS + 2 }, (_, i) =>
-			makeTask({ id: `bg-${String(i).padStart(6, "0")}`, status: "done", endedAt: i + 1, parkedAt: i + 2, session: "s1" }));
+			makeTask({ id: `bg-${String(i).padStart(6, "0")}`, status: "done", endedAt: i + 1, session: "s1" }));
 		const selected = selectHandleTasks(many, "s1");
 		assert.equal(selected.tasks.length, MAX_HANDLE_TASKS);
 		assert.equal(selected.tasks[0].id, "bg-000000");
@@ -341,14 +308,11 @@ describe("selectHandleTasks", () => {
 		assert.match(selectHandleTasks(many, "s1", many.map((t) => t.id)).error ?? "", /at most/);
 	});
 
-	test("acknowledgment removes completed tasks from footer but keeps them in ls data", () => {
+	test("only completed tasks are acknowledged; records remain available", () => {
 		const now = 500;
-		assert.deepEqual(footerTasks(tasks, now).parked.map((t) => t.id), ["bg-aaaaaa", "bg-aaaabb"]);
 		acknowledgeTasks(tasks, new Set(["bg-aaaaaa", "bg-cccccc"]), now);
 		assert.equal(tasks[0].handledAt, now);
 		assert.equal(tasks[2].handledAt, undefined); // running task still awaits its final result
-		assert.deepEqual(footerTasks(tasks, now).parked.map((t) => t.id), ["bg-aaaabb"]);
-		assert.deepEqual(footerTasks(tasks, now).fresh.map((t) => t.id), ["bg-aaaabb", "bg-dddddd"]);
 		assert.equal(tasks[0].status, "done"); // ls can still show it
 		assert.deepEqual(selectHandleTasks(tasks, "s1").tasks.map((t) => t.id), ["bg-aaaabb"]);
 	});
@@ -392,6 +356,8 @@ describe("startTask", () => {
 		assert.ok(found);
 		assert.equal(found?.name, "smoke");
 		assert.equal(found?.session, "s1");
+		assert.equal(found?.handledAt, undefined);
+		assert.equal(Object.hasOwn(found, "notify"), false);
 	});
 
 	afterEach(() => {

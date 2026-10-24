@@ -2,7 +2,7 @@
  * pi-easy-bg — core logic (no pi imports; unit-testable)
  *
  * Everything here is plain Node: state files, ids, log tails, status resolution,
- * task spawning, batch handling selection, watch patterns and formatting. The pi integration lives in
+ * task spawning, batch handling selection and formatting. The pi integration lives in
  * `extensions/easy-bg.ts`.
  */
 
@@ -15,9 +15,8 @@
  * Design goals:
  *  - Return immediately: the chat is never blocked by a long command
  *  - Parallelism lives in the harness: one run can start several tasks; one status returns all
- *  - Passive results: completed tasks show cards; status/handle/inspect are used on demand
- *  - Results never leak into unrelated turns by default: the card is display-only;
- *    people or agents use status/inspect/handle explicitly (see NOTIFY modes below)
+ *  - Pull-only results: people or agents use status/inspect/handle explicitly;
+ *    completion never sends a message or opens a model turn
  *  - Persistent state: survives pi restarts and session switches (heartbeat + adoption)
  *  - Bounded output: per-task byte cap, process-group kill, ANSI-stripped tails
  *
@@ -33,7 +32,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export const VERSION = "3.0.0";
 export const DEFAULT_TIMEOUT_SEC = Number(process.env.EASY_BG_TIMEOUT_SEC) || 600;
 export const DEFAULT_MAX_BYTES = Number(process.env.EASY_BG_MAX_BYTES) || 20 * 1024 * 1024;
 export const MAX_RUNNING_TASKS = 8;
@@ -45,23 +43,12 @@ export const CAP_CHECK_MS = 100;
 export const LEASE_MS = 5000;
 export const ADOPT_STALE_MS = 20000;
 export const TAIL_BYTES = 64 * 1024;
-export const NOTIFY_TAIL_LINES = 20;
 export const MAX_HANDLE_TASKS = 10;
 export const HANDLE_LOG_CHARS = 4000;
-// 内存去重账本上限。它只是“同一进程内”的防抖；权威去重依据是磁盘上的 task.notified，
-// 所以到顶时整体清空是安全的（最坏情况只是多走一次已处理判断），但可防单调增长。
-export const NOTIFY_KEYS_MAX = 5000;
 export const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 
 export type TaskStatus = "running" | "done" | "failed" | "killed" | "timeout" | "output_cap" | "exited";
 export type KillReason = "user" | "timeout" | "output_cap";
-export type NotifyMode = "now" | "park" | "manual";
-
-export const NOTIFY_MODES: NotifyMode[] = ["now", "park", "manual"];
-// now = 完成即开 turn；park = 默认只上屏，等待主动检查；manual = 不显示卡片
-// 旧配置 EASY_BG_NOTIFY=auto 回退到 park；旧任务记录中的 auto 也在 modeOf 中按 park 处理。
-export const DEFAULT_NOTIFY: NotifyMode = NOTIFY_MODES.includes((process.env.EASY_BG_NOTIFY ?? "") as NotifyMode) ? (process.env.EASY_BG_NOTIFY as NotifyMode) : "park";
-
 export interface Task {
 	id: string;
 	name?: string;
@@ -75,18 +62,9 @@ export interface Task {
 	status: TaskStatus;
 	timeoutSec: number;
 	maxBytes: number;
-	watch?: string;
-	notify: boolean;
-	notifyMode?: NotifyMode;
-	notified?: boolean;
-	parkedAt?: number;
 	handledAt?: number;
-	// 用户已 /easy-bg handle，但当时 agent 不空闲：等空闲后投递
-	wantedAt?: number;
-	patternNotified?: boolean;
 	killReason?: KillReason;
 	capped?: boolean;
-	note?: string;
 	claimedBy?: string;
 	claimedAt?: number;
 }
@@ -142,8 +120,7 @@ export function withTasks(mutator: (tasks: Task[]) => void): Task[] {
 	return tasks;
 }
 
-// id = 唯一短串（bg-3f9a2c）：clear / GC / 跨重启 / 多实例都不会复用，
-// stop / inspect 支持唯一前缀（例：bg-3f）。不再用可读递增号。
+// 随机短串（bg-3f9a2c），检查当前记录中的冲突；stop / inspect 支持唯一前缀。
 export function nextId(tasks: Task[]): string {
 	const taken = new Set(tasks.map((t) => t.id));
 	for (let i = 0; i < 8; i++) {
@@ -223,31 +200,6 @@ export function elapsed(t: Task): string {
 	return `${(sec / 3600).toFixed(1)}h`;
 }
 
-function escapeRegex(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * `substring` -> literal match; `/body/flags` -> regex.
- *
- * Only non-stateful flags are kept: `g`/`y` make `.test()` remember `lastIndex`,
- * so a repeated tick would alternate between match and miss. Unknown letters are
- * dropped instead of throwing (a bad flag must not break the observation loop),
- * and a malformed body falls back to a literal match. Matching is always
- * case-insensitive, as documented.
- */
-export function compileWatch(pattern: string): RegExp {
-	const m = pattern.match(/^\/(.*)\/([a-z]*)$/);
-	if (!m) return new RegExp(escapeRegex(pattern), "i");
-	const allowed = new Set(["d", "i", "m", "s"]);
-	const flags = [...new Set([...m[2].split("").filter((f) => allowed.has(f)), "i"])].join("");
-	try {
-		return new RegExp(m[1], flags);
-	} catch {
-		return new RegExp(escapeRegex(pattern), "i");
-	}
-}
-
 export function killTask(t: Task, reason: KillReason): void {
 	if (isTerminal(t.status)) return;
 	t.killReason = reason;
@@ -302,9 +254,6 @@ export interface StartSpec {
 	name?: string;
 	timeoutSec?: number;
 	maxBytes?: number;
-	watch?: string;
-	notify?: boolean;
-	notifyMode?: NotifyMode;
 }
 
 export function startTask(sc: StartContext, spec: StartSpec, sid: string): Task {
@@ -365,9 +314,6 @@ export function startTask(sc: StartContext, spec: StartSpec, sid: string): Task 
 		status: "running",
 		timeoutSec: spec.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
 		maxBytes: spec.maxBytes ?? DEFAULT_MAX_BYTES,
-		watch: spec.watch,
-		notify: spec.notify !== false,
-		notifyMode: spec.notifyMode,
 		claimedBy: sid,
 		claimedAt: Date.now(),
 	};
@@ -382,7 +328,7 @@ export function ambiguousIn(all: Task[], ref: string): Task[] {
 	return all.filter((t) => t.id.startsWith(q) || (t.name ?? "").startsWith(q));
 }
 
-// 显式 id/唯一前缀可跨会话；省略 id 时只取本会话尚未交付的 parked 结果。
+// 显式 id/唯一前缀可跨会话；省略 id 时取本会话未处理的终态任务。
 export function selectHandleTasks(all: Task[], sid: string, refs?: string[]): { tasks: Task[]; omitted: number; error?: string } {
 	if (refs?.length) {
 		if (refs.length > MAX_HANDLE_TASKS) return { tasks: [], omitted: 0, error: `handle accepts at most ${MAX_HANDLE_TASKS} task ids` };
@@ -398,7 +344,7 @@ export function selectHandleTasks(all: Task[], sid: string, refs?: string[]): { 
 		}
 		return { tasks: selected, omitted: 0 };
 	}
-	const pending = all.filter((t) => t.session === sid && isTerminal(t.status) && t.parkedAt && !t.handledAt)
+	const pending = all.filter((t) => t.session === sid && isTerminal(t.status) && !t.handledAt)
 		.sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt));
 	return { tasks: pending.slice(0, MAX_HANDLE_TASKS), omitted: Math.max(0, pending.length - MAX_HANDLE_TASKS) };
 }
@@ -408,16 +354,7 @@ export function acknowledgeTasks(all: Task[], ids: Set<string>, at: number = Dat
 	for (const t of all) {
 		if (!ids.has(t.id) || !isTerminal(t.status)) continue;
 		t.handledAt = at;
-		delete t.wantedAt;
 	}
-}
-
-export function footerTasks(all: Task[], now: number = Date.now()): { running: Task[]; fresh: Task[]; parked: Task[] } {
-	return {
-		running: all.filter((t) => t.status === "running"),
-		fresh: all.filter((t) => isTerminal(t.status) && !t.handledAt && t.endedAt && now - t.endedAt < 10 * 60 * 1000),
-		parked: all.filter((t) => t.parkedAt && !t.handledAt),
-	};
 }
 
 // 按 id / 唯一前缀 / name 查找；空引用返回本会话最近一个任务
@@ -435,13 +372,6 @@ export function summaryLine(t: Task): string {
 	];
 	const label = t.name ? `${t.name}: ${t.command}` : t.command;
 	return `${t.id}  ${bits.join("  ")}  ${label.replace(/\s*\n\s*/g, " \u23ce ").replace(/\t/g, " ").slice(0, 120)}`;
-}
-
-export function wakeText(t: Task): string {
-	const head = `[easy-bg] ${t.id}${t.name ? ` "${t.name}"` : ""} ${STATUS_LABEL[t.status]} ${t.exitCode !== undefined ? `exit=${t.exitCode}` : ""} in ${elapsed(t)}`;
-	const tail = tailText(t, NOTIFY_TAIL_LINES);
-	const cappedNote = logSize(t) > NOTIFY_TAIL_LINES * 4000 ? `\n(log is ${Math.round(logSize(t) / 1024)}KB total — run /easy-bg inspect ${t.id} for more)` : "";
-	return `${head}\n${tail ? `${tail}\n` : ""}${cappedNote}`.trim();
 }
 
 export function commandHint(id: string): string {

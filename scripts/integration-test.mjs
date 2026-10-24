@@ -11,8 +11,8 @@
  * deterministic) and asserts on the persistent state plus the extension's own events:
  *
  *   done / failed / timeout / output_cap / killed / exited-by-`set -e` / shebang exit code
- *   default park (even with legacy EASY_BG_NOTIFY=auto)  ·  manual (marks it handled)
- *   inspect (read-only) · reject removed now/log subcommands
+ *   silent completion (even with legacy EASY_BG_NOTIFY=now)
+ *   inspect (read-only) · reject removed notify/watch options and old subcommands
  *   clear (keeps running tasks and unhandled results)  ·  clear --all
  *   no `extension_error` on any event
  *
@@ -54,7 +54,7 @@ function check(name, ok, detail) {
 
 const child = spawn("pi", ["-ne", "-e", repo, "--mode", "rpc", "--no-session"], {
 	cwd: workDir,
-	env: { ...process.env, EASY_BG_DIR: stateDir, EASY_BG_NOTIFY: "auto", EASY_BG_QUIET_MS: "100", EASY_BG_MAX_BYTES: String(MAX_BYTES) },
+	env: { ...process.env, EASY_BG_DIR: stateDir, EASY_BG_NOTIFY: "now", EASY_BG_MAX_BYTES: String(MAX_BYTES) },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -120,7 +120,7 @@ async function waitFor(label, predicate, timeoutMs = 25_000) {
 // ---------------------------------------------------------------------------
 
 try {
-	await waitFor("extension banner", () => events.some((e) => JSON.stringify(e).includes("easy-bg v")), 20_000);
+	await waitFor("extension ready", () => fs.existsSync(path.join(stateDir, "tasks.json")), 20_000);
 	check("extension loads", true);
 
 	// MAX_RUNNING_TASKS is 8: stay at or below it, and start the long-running task only
@@ -131,8 +131,8 @@ try {
 	send(`/easy-bg --name cap bash -c 'seq 1 300000'`);
 	send("/easy-bg --name sete set -e\nfalse");
 	send("/easy-bg --name sheb #!/usr/bin/env python3\nimport sys\nsys.exit(5)");
-	send("/easy-bg --name manual --notify manual echo done-manual");
-	send("/easy-bg --name parked echo unhandled-result");
+	send("/easy-bg --name handled echo done-handled");
+	send("/easy-bg --name pending echo unhandled-result");
 
 	await waitFor("ok done", () => byName("ok")?.status === "done");
 	check("exit 0 -> DONE", byName("ok")?.exitCode === 0);
@@ -154,27 +154,26 @@ try {
 	check("shebang script runs and reports exit code", sheb.status === "failed" && sheb.exitCode === 5, `status=${sheb.status} exit=${sheb.exitCode}`);
 	check("shebang command stored as an executable run.user", fs.existsSync(path.join(stateDir, sheb.id, "run.user")));
 
-	await waitFor("manual handled", () => byName("manual")?.handledAt);
-	check("--notify manual marks the result handled without a card", Boolean(byName("manual")?.handledAt));
-
-	const parked = await waitFor("parked", () => (byName("parked")?.parkedAt ? byName("parked") : undefined));
-	check("legacy auto config falls back to default park without delivery", Boolean(parked.parkedAt) && !parked.handledAt);
-	send("/easy-bg --name rejected --notify auto echo should-not-run");
-	await waitFor("invalid notify warning", () => events.some((e) => JSON.stringify(e).includes('invalid notify mode')));
-	check("removed --notify auto is rejected", !byName("rejected"));
-	check("park shows a display-only card", events.some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg-result"));
-	// Old auto would have delivered after 100ms (+ one tick); parked results must stay passive.
+	await waitFor("handled task done", () => byName("handled")?.status === "done");
+	const pending = await waitFor("pending task done", () => (byName("pending")?.status === "done" ? byName("pending") : undefined));
 	await new Promise((r) => setTimeout(r, 3_200));
-	check("park stays unhandled after idle time", !byName("parked")?.handledAt);
+	check("completion stays silent and unhandled despite old EASY_BG_NOTIFY setting", tasks().filter((t) => t.status !== "running").every((t) => !t.handledAt && !t.parkedAt && !t.notified));
+	check("no completion card or automatic agent turn", !events.some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg-result") && !events.some((e) => e.type === "agent_start"));
+	send("/easy-bg --name rejected --notify now echo should-not-run");
+	await waitFor("removed flag warning", () => events.some((e) => JSON.stringify(e).includes("watch/notify options have been removed")));
+	check("removed --notify is rejected", !byName("rejected"));
+	send("/easy-bg --name rejected-watch --watch error echo should-not-run");
+	await new Promise((r) => setTimeout(r, 300));
+	check("removed --watch is rejected", !byName("rejected-watch"));
 	const inspectEvent = events.length;
-	send(`/easy-bg inspect ${parked.id}`);
-	await waitFor("inspect card", () => events.slice(inspectEvent).some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg" && JSON.stringify(e).includes(parked.id)));
-	check("inspect shows the log but does not handle the task", !byName("parked")?.handledAt);
+	send(`/easy-bg inspect ${pending.id}`);
+	await waitFor("inspect card", () => events.slice(inspectEvent).some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg" && JSON.stringify(e).includes(pending.id)));
+	check("inspect shows the log but does not handle the task", !byName("pending")?.handledAt);
 	send("/easy-bg now");
 	await waitFor("old now warning", () => events.some((e) => JSON.stringify(e).includes('unknown easy-bg subcommand \\"now\\"')));
-	send(`/easy-bg log ${parked.id}`);
+	send(`/easy-bg log ${pending.id}`);
 	await waitFor("old log warning", () => events.some((e) => JSON.stringify(e).includes('unknown easy-bg subcommand \\"log\\"')));
-	check("removed commands do not start a task or handle results", !byName("parked")?.handledAt && !tasks().some((t) => t.command === "now"));
+	check("removed commands do not start a task or handle results", !byName("pending")?.handledAt && !tasks().some((t) => t.command === "now"));
 
 	// start the long-running task only now, so the 8-task limit is never hit
 	send("/easy-bg --name kill sleep 30");
@@ -184,10 +183,11 @@ try {
 	const killed = await waitFor("killed", () => (byName("kill")?.status === "killed" ? byName("kill") : undefined));
 	check("stop -> KILLED", killed.status === "killed");
 
-	// `clear` is conservative by design: it keeps running tasks, unhandled results and
-	// other sessions. In park mode finished tasks remain unhandled until explicit delivery;
-	// the `--notify manual` task is already handled.
-	const unhandledBefore = tasks().filter((t) => t.parkedAt && !t.handledAt).map((t) => t.name).sort();
+	// Mark one task handled in state to exercise clear without invoking a real model.
+	const snapshot = tasks();
+	snapshot.find((t) => t.name === "handled").handledAt = Date.now();
+	fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(snapshot));
+	const unhandledBefore = tasks().filter((t) => t.status !== "running" && !t.handledAt).map((t) => t.name).sort();
 	send("/easy-bg --name keepalive sleep 30");
 	await waitFor("keepalive", () => byName("keepalive")?.status === "running");
 
@@ -196,11 +196,11 @@ try {
 	await waitFor("clear", () => tasks().length < before);
 	const afterClear = tasks();
 	check("clear keeps the running task", afterClear.some((t) => t.name === "keepalive" && t.status === "running"));
-	check("clear drops the handled task", !afterClear.some((t) => t.name === "manual"));
+	check("clear drops the handled task", !afterClear.some((t) => t.name === "handled"));
 	check(
 		"clear keeps every unhandled result",
 		unhandledBefore.every((name) => afterClear.some((t) => t.name === name && !t.handledAt)),
-		`kept ${afterClear.filter((t) => t.parkedAt && !t.handledAt).length}/${unhandledBefore.length}`,
+		`kept ${afterClear.filter((t) => t.status !== "running" && !t.handledAt).length}/${unhandledBefore.length}`,
 	);
 
 	send("/easy-bg clear --all");
