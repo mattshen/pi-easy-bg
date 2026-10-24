@@ -2,7 +2,7 @@
  * pi-easy-bg — core logic (no pi imports; unit-testable)
  *
  * Everything here is plain Node: state files, ids, log tails, status resolution,
- * task spawning, batch result selection, watch patterns and formatting. The pi integration lives in
+ * task spawning, batch handling selection, watch patterns and formatting. The pi integration lives in
  * `extensions/easy-bg.ts`.
  */
 
@@ -10,14 +10,14 @@
  * pi-easy-bg — background shell tasks for pi
  *
  * User interface:  /easy-bg (bare form = run)
- * Model interface: single tool `easy_bg` (action: run | status | results | logs | stop | clear)
+ * Model interface: single tool `easy_bg` (action: run | status | handle | inspect | stop | clear)
  *
  * Design goals:
  *  - Return immediately: the chat is never blocked by a long command
  *  - Parallelism lives in the harness: one run can start several tasks; one status returns all
- *  - Passive results: completed tasks show cards; status/results/logs are checked on demand
+ *  - Passive results: completed tasks show cards; status/handle/inspect are used on demand
  *  - Results never leak into unrelated turns by default: the card is display-only;
- *    people or agents inspect status/logs explicitly (see NOTIFY modes below)
+ *    people or agents use status/inspect/handle explicitly (see NOTIFY modes below)
  *  - Persistent state: survives pi restarts and session switches (heartbeat + adoption)
  *  - Bounded output: per-task byte cap, process-group kill, ANSI-stripped tails
  *
@@ -33,7 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export const VERSION = "2.0.0";
+export const VERSION = "3.0.0";
 export const DEFAULT_TIMEOUT_SEC = Number(process.env.EASY_BG_TIMEOUT_SEC) || 600;
 export const DEFAULT_MAX_BYTES = Number(process.env.EASY_BG_MAX_BYTES) || 20 * 1024 * 1024;
 export const MAX_RUNNING_TASKS = 8;
@@ -46,8 +46,8 @@ export const LEASE_MS = 5000;
 export const ADOPT_STALE_MS = 20000;
 export const TAIL_BYTES = 64 * 1024;
 export const NOTIFY_TAIL_LINES = 20;
-export const MAX_RESULT_TASKS = 10;
-export const RESULT_LOG_CHARS = 4000;
+export const MAX_HANDLE_TASKS = 10;
+export const HANDLE_LOG_CHARS = 4000;
 // 内存去重账本上限。它只是“同一进程内”的防抖；权威去重依据是磁盘上的 task.notified，
 // 所以到顶时整体清空是安全的（最坏情况只是多走一次已处理判断），但可防单调增长。
 export const NOTIFY_KEYS_MAX = 5000;
@@ -81,7 +81,7 @@ export interface Task {
 	notified?: boolean;
 	parkedAt?: number;
 	handledAt?: number;
-	// 用户已 /easy-bg now，但当时 agent 不空闲：等空闲后立刻投递（仍然开独立 turn，不 followUp 插入当前 turn）
+	// 用户已 /easy-bg handle，但当时 agent 不空闲：等空闲后投递
 	wantedAt?: number;
 	patternNotified?: boolean;
 	killReason?: KillReason;
@@ -143,7 +143,7 @@ export function withTasks(mutator: (tasks: Task[]) => void): Task[] {
 }
 
 // id = 唯一短串（bg-3f9a2c）：clear / GC / 跨重启 / 多实例都不会复用，
-// stop / log 支持唯一前缀（例：bg-3f）。不再用可读递增号。
+// stop / inspect 支持唯一前缀（例：bg-3f）。不再用可读递增号。
 export function nextId(tasks: Task[]): string {
 	const taken = new Set(tasks.map((t) => t.id));
 	for (let i = 0; i < 8; i++) {
@@ -382,16 +382,15 @@ export function ambiguousIn(all: Task[], ref: string): Task[] {
 	return all.filter((t) => t.id.startsWith(q) || (t.name ?? "").startsWith(q));
 }
 
-// 批量读取：显式 id/唯一前缀可跨会话；省略 id 时取本会话最近结束的任务。
-// 不修改任务状态，agent 可以按需重读；默认限制数量，避免旧任务挤满上下文。
-export function selectResultTasks(all: Task[], sid: string, refs?: string[]): { tasks: Task[]; omitted: number; error?: string } {
+// 显式 id/唯一前缀可跨会话；省略 id 时只取本会话尚未交付的 parked 结果。
+export function selectHandleTasks(all: Task[], sid: string, refs?: string[]): { tasks: Task[]; omitted: number; error?: string } {
 	if (refs?.length) {
-		if (refs.length > MAX_RESULT_TASKS) return { tasks: [], omitted: 0, error: `results accepts at most ${MAX_RESULT_TASKS} task ids` };
+		if (refs.length > MAX_HANDLE_TASKS) return { tasks: [], omitted: 0, error: `handle accepts at most ${MAX_HANDLE_TASKS} task ids` };
 		const selected: Task[] = [];
 		const seen = new Set<string>();
 		for (const raw of refs) {
 			const ref = raw.trim();
-			if (!ref) return { tasks: [], omitted: 0, error: "results needs non-empty task ids" };
+			if (!ref) return { tasks: [], omitted: 0, error: "handle needs non-empty task ids" };
 			const matches = ambiguousIn(all, ref);
 			if (matches.length > 1) return { tasks: [], omitted: 0, error: `ambiguous task "${ref}": ${matches.map((t) => t.id).join(", ")}` };
 			if (!matches.length) return { tasks: [], omitted: 0, error: `no such task: ${ref}` };
@@ -399,9 +398,26 @@ export function selectResultTasks(all: Task[], sid: string, refs?: string[]): { 
 		}
 		return { tasks: selected, omitted: 0 };
 	}
-	const finished = all.filter((t) => t.session === sid && isTerminal(t.status))
+	const pending = all.filter((t) => t.session === sid && isTerminal(t.status) && t.parkedAt && !t.handledAt)
 		.sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt));
-	return { tasks: finished.slice(-MAX_RESULT_TASKS), omitted: Math.max(0, finished.length - MAX_RESULT_TASKS) };
+	return { tasks: pending.slice(0, MAX_HANDLE_TASKS), omitted: Math.max(0, pending.length - MAX_HANDLE_TASKS) };
+}
+
+// 只有已结束任务在交付后标为 handled；运行中任务的最终结果仍需后续处理。
+export function acknowledgeTasks(all: Task[], ids: Set<string>, at: number = Date.now()): void {
+	for (const t of all) {
+		if (!ids.has(t.id) || !isTerminal(t.status)) continue;
+		t.handledAt = at;
+		delete t.wantedAt;
+	}
+}
+
+export function footerTasks(all: Task[], now: number = Date.now()): { running: Task[]; fresh: Task[]; parked: Task[] } {
+	return {
+		running: all.filter((t) => t.status === "running"),
+		fresh: all.filter((t) => isTerminal(t.status) && !t.handledAt && t.endedAt && now - t.endedAt < 10 * 60 * 1000),
+		parked: all.filter((t) => t.parkedAt && !t.handledAt),
+	};
 }
 
 // 按 id / 唯一前缀 / name 查找；空引用返回本会话最近一个任务
@@ -424,11 +440,11 @@ export function summaryLine(t: Task): string {
 export function wakeText(t: Task): string {
 	const head = `[easy-bg] ${t.id}${t.name ? ` "${t.name}"` : ""} ${STATUS_LABEL[t.status]} ${t.exitCode !== undefined ? `exit=${t.exitCode}` : ""} in ${elapsed(t)}`;
 	const tail = tailText(t, NOTIFY_TAIL_LINES);
-	const cappedNote = logSize(t) > NOTIFY_TAIL_LINES * 4000 ? `\n(log is ${Math.round(logSize(t) / 1024)}KB total — run /easy-bg log ${t.id} for more)` : "";
+	const cappedNote = logSize(t) > NOTIFY_TAIL_LINES * 4000 ? `\n(log is ${Math.round(logSize(t) / 1024)}KB total — run /easy-bg inspect ${t.id} for more)` : "";
 	return `${head}\n${tail ? `${tail}\n` : ""}${cappedNote}`.trim();
 }
 
 export function commandHint(id: string): string {
-	return `/easy-bg log ${id}`;
+	return `/easy-bg inspect ${id}`;
 }
 

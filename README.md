@@ -8,7 +8,7 @@ Background shell tasks for [pi](https://pi.dev): start long commands without blo
 
   ■ background [easy-bg] bg-3f9a2c "build" DONE exit=0 in 47s
     … build output …
-    /easy-bg ls · /easy-bg log bg-3f9a2c · /easy-bg now bg-3f9a2c (optional)
+    /easy-bg ls · /easy-bg inspect bg-3f9a2c · /easy-bg handle bg-3f9a2c (optional)
 ```
 
 ## Why
@@ -44,9 +44,9 @@ Uninstall: `pi remove git:github.com/mattshen/pi-easy-bg`.
 ```bash
 /easy-bg --name build make -j8                  # start, returns at once
 /easy-bg ls                                     # what is running / finished
-/easy-bg log bg-3f9a2c 80                       # tail 80 lines
+/easy-bg inspect bg-3f9a2c 80                   # tail 80 lines without handling
 /easy-bg stop bg-3f9a2c                         # kill the whole process group
-/easy-bg now                                    # hand parked results to the model now
+/easy-bg handle                                 # hand parked results to the model
 ```
 
 Start several at once (one call, not N tool calls):
@@ -63,15 +63,15 @@ With the model-facing tool, one call can fan out:
 
 ## Delivery modes
 
-The default is `park`: a finished task shows a **display-only** card. It does not enter model context, attach to your next question, or start a turn. People can check `/easy-bg ls` and `/easy-bg log <id>`; agents can call `easy_bg` with `action=status`, `results` (several tasks at once), or `logs`. These actions do not start another turn. Avoid polling in a tight loop: check when you next need the result.
+The default is `park`: a finished task shows a **display-only** card. It does not enter model context, attach to your next question, or start a turn. Both people and agents can **inspect** logs without handling the task. To **handle** parked results, a person uses `/easy-bg handle [id]` (opens a model turn); an agent uses `action=handle` (returns results into its current turn, up to 10 tasks at once). After successful delivery, completed tasks leave the pending footer, but remain in `/easy-bg ls` and on disk until cleared. Avoid polling in a tight loop.
 
 | `--notify` | Behaviour |
 |---|---|
-| `park` *(default)* | Card only. Check status/logs yourself, or explicitly deliver with `/easy-bg now`. |
+| `park` *(default)* | Card only. Inspect on demand, or explicitly handle the result. |
 | `now` | Opt in to a model turn when the task finishes. |
-| `manual` | No card or message. Same as `--no-notify`; status/logs remain available. |
+| `manual` | No card or message. Same as `--no-notify`; status and inspect remain available. |
 
-`/easy-bg now [id]` explicitly hands parked results to the model (queued until idle if it is busy). `--watch <pattern>` explicitly wakes the model once on matching output. These and `--notify now` are the only automatic wake-ups; there is no idle-time delivery.
+`/easy-bg handle [id]` hands parked results to the model (queued until idle if it is busy). `--watch <pattern>` explicitly wakes the model once on matching output. These and `--notify now` are opt-in wake-ups; there is no idle-time delivery.
 
 ## Task states
 
@@ -116,9 +116,9 @@ Exit codes are captured with an `EXIT` trap, so `set -e` failures and explicit `
 | `/easy-bg <command>` | Start a task (bare form of `run`) |
 | `/easy-bg run [flags] <command>` | Same, explicit |
 | `/easy-bg ls` | List running and finished tasks |
-| `/easy-bg log <id> [lines]` | Tail a log (default 40 lines) |
+| `/easy-bg inspect <id> [lines]` | Tail a log without handling (default 40 lines) |
 | `/easy-bg stop <id>` | Kill the task's process group |
-| `/easy-bg now [id]` | Deliver parked results (all, or one) |
+| `/easy-bg handle [id]` | Hand parked results to the model (all, or one) |
 | `/easy-bg clear` | Drop **this session's** already-handled finished tasks |
 | `/easy-bg clear --all` | Drop every finished task, all sessions, including unhandled results |
 | `/easy-bg help` | Usage |
@@ -127,7 +127,7 @@ Flags: `--name <label>`, `--timeout <sec|0>`, `--watch <substring|/regex/flags>`
 
 `<id>` accepts a unique prefix (`bg-3f`). An ambiguous prefix lists the candidates instead of guessing.
 
-`clear` never deletes a running task, never deletes an unhandled result, and never touches other pi sessions unless you pass `--all`. It reports what it did, e.g. `3 cleared · 1 unhandled kept → /easy-bg now · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`.
+`clear` never deletes a running task, never deletes an unhandled result, and never touches other pi sessions unless you pass `--all`. It reports what it did, e.g. `3 cleared · 1 unhandled kept → /easy-bg handle · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`.
 
 ## Model tool
 
@@ -137,12 +137,12 @@ One tool, `easy_bg`, with an `action` enum — easy for small models to use corr
 |---|---|
 | `run` | `command: string[]` (1..N, one task each), `name?`, `timeout?`, `watch?`, `notify?` |
 | `status` | — (aggregate of this session's tasks) |
-| `results` | `tasks?` (up to 10 ids/unique prefixes; omitted = latest 10 finished tasks in this session), or `task?` for one; `lines?` (default 30, max 100 per task) |
-| `logs` | `task` (id or unique prefix), `lines?` (default 30, max 400) |
+| `handle` | `tasks?` (up to 10 ids/unique prefixes; omitted = up to 10 pending parked results in this session), or `task?` for one; `lines?` (default 30, max 100 per task) |
+| `inspect` | `task` (id or unique prefix), `lines?` (default 30, max 400) |
 | `stop` | `task` |
 | `clear` | — |
 
-After `run`, the model can do other work or end its turn. When asked to summarize multiple tasks, it can use `results` to read their status and output in one tool response, then answer in the **same turn**. `results` is read-only: it does not open another turn or mark results handled. Explicit ids can include running tasks (with partial output) or tasks from another session; with no ids, only finished tasks in this session are selected. At most 4,000 characters of output per task are included; use `logs` for more. If the agent has already ended its turn, a new user message is needed before it can call the tool. `pi --no-easy-bg-tool` hides the tool and leaves only the slash commands.
+After `run`, the model can do other work or end its turn. When asked to summarize multiple tasks, it can use `handle` to read their status and output in one tool response, then answer in the **same turn**. Completed tasks are marked handled and removed from the pending footer, but remain available in `status`, `inspect`, and `/easy-bg ls`. Running tasks can be selected explicitly to see partial output; they are not marked handled. Explicit ids may refer to another session; with no ids, `handle` takes up to 10 unhandled parked results from this session, oldest first. At most 4,000 characters of output per task are included; use `inspect` for more without marking a task handled. If the agent has already ended its turn, a new user message is needed before it can call the tool. `pi --no-easy-bg-tool` hides the tool and leaves only the slash commands.
 
 ## Configuration
 

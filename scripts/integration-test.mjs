@@ -12,6 +12,7 @@
  *
  *   done / failed / timeout / output_cap / killed / exited-by-`set -e` / shebang exit code
  *   default park (even with legacy EASY_BG_NOTIFY=auto)  ·  manual (marks it handled)
+ *   inspect (read-only) · reject removed now/log subcommands
  *   clear (keeps running tasks and unhandled results)  ·  clear --all
  *   no `extension_error` on any event
  *
@@ -165,6 +166,15 @@ try {
 	// Old auto would have delivered after 100ms (+ one tick); parked results must stay passive.
 	await new Promise((r) => setTimeout(r, 3_200));
 	check("park stays unhandled after idle time", !byName("parked")?.handledAt);
+	const inspectEvent = events.length;
+	send(`/easy-bg inspect ${parked.id}`);
+	await waitFor("inspect card", () => events.slice(inspectEvent).some((e) => e.type === "entry_appended" && e.entry?.customType === "easy-bg" && JSON.stringify(e).includes(parked.id)));
+	check("inspect shows the log but does not handle the task", !byName("parked")?.handledAt);
+	send("/easy-bg now");
+	await waitFor("old now warning", () => events.some((e) => JSON.stringify(e).includes('unknown easy-bg subcommand \\"now\\"')));
+	send(`/easy-bg log ${parked.id}`);
+	await waitFor("old log warning", () => events.some((e) => JSON.stringify(e).includes('unknown easy-bg subcommand \\"log\\"')));
+	check("removed commands do not start a task or handle results", !byName("parked")?.handledAt && !tasks().some((t) => t.command === "now"));
 
 	// start the long-running task only now, so the 8-task limit is never hit
 	send("/easy-bg --name kill sleep 30");

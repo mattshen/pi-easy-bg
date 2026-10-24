@@ -8,7 +8,7 @@
 
   ■ background [easy-bg] bg-3f9a2c "build" DONE exit=0 in 47s
     … 构建输出 …
-    /easy-bg ls · /easy-bg log bg-3f9a2c · /easy-bg now bg-3f9a2c（可选）
+    /easy-bg ls · /easy-bg inspect bg-3f9a2c · /easy-bg handle bg-3f9a2c（可选）
 ```
 
 ## 为什么
@@ -44,9 +44,9 @@ pi -e git:github.com/mattshen/pi-easy-bg
 ```bash
 /easy-bg --name build make -j8                  # 启动，立刻返回
 /easy-bg ls                                     # 运行中 / 已完成
-/easy-bg log bg-3f9a2c 80                       # 看最后 80 行
+/easy-bg inspect bg-3f9a2c 80                   # 查看最后 80 行，不标记已处理
 /easy-bg stop bg-3f9a2c                         # 杀掉整个进程组
-/easy-bg now                                    # 立刻把 parked 结果交给模型
+/easy-bg handle                                 # 把 parked 结果交给模型
 ```
 
 一次起多个（一次调用，而不是 N 次工具调用）：
@@ -57,15 +57,15 @@ pi -e git:github.com/mattshen/pi-easy-bg
 
 ## 投递模式
 
-默认 `park`：任务完成时只显示**只上屏**的卡片，不进入模型上下文，不附着到下一个问题，也不自动开启 turn。人可以用 `/easy-bg ls` 和 `/easy-bg log <id>` 查看；agent 在当前轮可主动调用 `easy_bg` 的 `status`、`results`（批量结果）或 `logs`。不要在同一轮里反复轮询。
+默认 `park`：任务完成时只显示卡片，不进入模型上下文，也不自动开启 turn。**inspect** 是只读查看：人用 `/easy-bg inspect <id>`，agent 用 `action=inspect`。**handle** 是交付处理：人用 `/easy-bg handle [id]` 开启模型 turn，agent 用 `action=handle` 在当前轮批量读取和汇总。成功交付的终态任务从底部待处理提示移除，但仍保留在 `/easy-bg ls` 和磁盘上。不要在同一轮里反复轮询。
 
 | `--notify` | 行为 |
 |---|---|
-| `park`（默认） | 只出卡片；按需检查状态/日志，或显式用 `/easy-bg now` 交给模型 |
+| `park`（默认） | 只出卡片；可 inspect，或显式 handle |
 | `now` | 显式选择：任务一结束就开启模型 turn |
-| `manual` | 不显示卡片或消息；仍可检查状态/日志。等同 `--no-notify` |
+| `manual` | 不显示卡片或消息；仍可查看状态和日志。等同 `--no-notify` |
 
-`/easy-bg now [id]` 可以主动把 parked 结果交给模型（模型忙时等空闲后投递）；`--watch <pattern>` 可以在输出命中时显式唤醒模型一次。只有 `now` 和 `watch` 会自动唤醒，不存在空闲自动投递。
+`/easy-bg handle [id]` 可以主动把 parked 结果交给模型（模型忙时等空闲后投递）；`--watch <pattern>` 可以在输出命中时显式唤醒模型一次。只有 `--notify now` 和 `watch` 会在任务运行时自动唤醒，不存在空闲自动投递。
 
 ## 任务状态
 
@@ -110,9 +110,9 @@ sys.exit(4)          # -> FAIL exit=4
 | `/easy-bg <command>` | 启动任务（`run` 的简写） |
 | `/easy-bg run [flags] <command>` | 同上，显式形式 |
 | `/easy-bg ls` | 列出运行中与已完成任务 |
-| `/easy-bg log <id> [lines]` | 看日志尾部（默认 40 行） |
+| `/easy-bg inspect <id> [lines]` | 只读查看日志尾部（默认 40 行） |
 | `/easy-bg stop <id>` | 杀掉任务进程组 |
-| `/easy-bg now [id]` | 投递 parked 结果（全部或指定一个） |
+| `/easy-bg handle [id]` | 交付 parked 结果（全部或指定一个） |
 | `/easy-bg clear` | 清理**本会话**已处理过的终态任务 |
 | `/easy-bg clear --all` | 清理所有会话的全部终态任务（含未处理结果） |
 | `/easy-bg help` | 用法 |
@@ -121,7 +121,7 @@ sys.exit(4)          # -> FAIL exit=4
 
 `<id>` 支持唯一前缀（`bg-3f`）；前缀不唯一时会列出候选而不是猜一个。
 
-`clear` 永不删除运行中的任务，永不删除未处理结果，也不会碰其他 pi 会话——除非显式 `--all`。它会报告做了什么，例如 `3 cleared · 1 unhandled kept → /easy-bg now · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`。
+`clear` 永不删除运行中的任务，永不删除未处理结果，也不会碰其他 pi 会话——除非显式 `--all`。它会报告做了什么，例如 `3 cleared · 1 unhandled kept → /easy-bg handle · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`。
 
 ## 模型工具
 
@@ -131,12 +131,12 @@ sys.exit(4)          # -> FAIL exit=4
 |---|---|
 | `run` | `command: string[]`（1..N，每个一项任务）、`name?`、`timeout?`、`watch?`、`notify?` |
 | `status` | —（本会话任务聚合） |
-| `results` | `tasks?`（最多 10 个 id/唯一前缀；省略则读本会话最近完成的 10 个任务）、`task?`（单个任务）、`lines?`（默认 30，每任务最多 100 行） |
-| `logs` | `task`（id 或唯一前缀）、`lines?`（默认 30，最大 400） |
+| `handle` | `tasks?`（最多 10 个 id/唯一前缀；省略则取本会话最多 10 个待处理结果）、`task?`（单个任务）、`lines?`（默认 30，每任务最多 100 行） |
+| `inspect` | `task`（id 或唯一前缀）、`lines?`（默认 30，最大 400） |
 | `stop` | `task` |
 | `clear` | — |
 
-`run` 之后模型可以继续做别的事或结束本轮。需要汇总多个任务时，模型在**当前轮**调用 `results`，一次取得各任务状态和日志，再自行回答；不会开启新 turn，也不会将任务标为已处理。显式指定 id 时可读运行中任务的部分输出或其他会话的任务；省略 id 只取本会话已完成任务。每任务最多返回 4000 字符日志，要看更多用 `logs`。如果模型已经结束本轮，需要新用户消息才能继续调用工具。`pi --no-easy-bg-tool` 可隐藏该工具，只保留斜杠命令。
+`run` 之后模型可以继续做别的事或结束本轮。需要汇总多个任务时，在**当前轮**调用 `handle`，一次取得各任务状态和日志，并将终态任务标为已处理、从底部待处理提示中移除；记录仍可通过 `/easy-bg ls` 查看。显式指定 id 可以读取运行中任务的部分输出（运行中不会标为已处理），也可指定其他会话任务；省略 id 只取本会话最多 10 个待处理 parked 结果（从最早的开始）。每任务最多返回 4000 字符日志；只读查看更多用 `inspect`。如果模型已结束本轮，需要新用户消息才能再调用工具。`pi --no-easy-bg-tool` 可隐藏该工具，只保留斜杠命令。
 
 ## 配置
 

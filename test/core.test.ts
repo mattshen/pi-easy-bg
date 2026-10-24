@@ -7,19 +7,21 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
 	ANSI,
 	DEFAULT_NOTIFY,
-	MAX_RESULT_TASKS,
+	MAX_HANDLE_TASKS,
 	NOTIFY_MODES,
 	STATUS_LABEL,
+	acknowledgeTasks,
 	ambiguousIn,
 	compileWatch,
 	elapsed,
 	findTask,
+	footerTasks,
 	isTerminal,
 	killTask,
 	nextId,
 	readExitCode,
 	resolveTerminal,
-	selectResultTasks,
+	selectHandleTasks,
 	truncateTail,
 	startTask,
 	summaryLine,
@@ -41,7 +43,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(stateDir, { recursive: true, force: true });
+	// startTask's detached wrapper may write its exit marker during cleanup.
+	fs.rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 });
 
 function makeTask(over: Partial<Task> = {}): Task {
@@ -296,20 +299,21 @@ describe("ambiguousIn / findTask", () => {
 });
 
 // ---------------------------------------------------------------------------
-// batch results (selection only; read-only)
+// batch handling and footer lifecycle
 // ---------------------------------------------------------------------------
 
-describe("selectResultTasks", () => {
+describe("selectHandleTasks", () => {
 	const tasks = [
 		makeTask({ id: "bg-aaaaaa", status: "done", session: "s1", endedAt: 100, parkedAt: 101 }),
 		makeTask({ id: "bg-aaaabb", status: "failed", session: "s1", endedAt: 200, parkedAt: 201 }),
 		makeTask({ id: "bg-cccccc", status: "running", session: "s1" }),
 		makeTask({ id: "bg-dddddd", status: "done", session: "s2", endedAt: 300 }),
+		makeTask({ id: "bg-eeeeee", status: "done", session: "s1", endedAt: 400, parkedAt: 401, handledAt: 450 }),
 	];
 
-	test("default returns completed tasks in this session without mutating them", () => {
+	test("default returns only pending parked tasks in this session without mutating them", () => {
 		const original = structuredClone(tasks);
-		const selected = selectResultTasks(tasks, "s1");
+		const selected = selectHandleTasks(tasks, "s1");
 		assert.deepEqual(selected.tasks.map((t) => t.id), ["bg-aaaaaa", "bg-aaaabb"]);
 		assert.equal(selected.omitted, 0);
 		assert.deepEqual(tasks, original);
@@ -317,24 +321,36 @@ describe("selectResultTasks", () => {
 	});
 
 	test("explicit ids include running or cross-session tasks, deduplicated", () => {
-		const selected = selectResultTasks(tasks, "s1", ["bg-cccc", "bg-ddd", "bg-cccc"]);
+		const selected = selectHandleTasks(tasks, "s1", ["bg-cccc", "bg-ddd", "bg-cccc"]);
 		assert.deepEqual(selected.tasks.map((t) => t.id), ["bg-cccccc", "bg-dddddd"]);
 	});
 
 	test("ambiguous, unknown and empty ids fail rather than returning other results", () => {
-		assert.match(selectResultTasks(tasks, "s1", ["bg-aaaa"]).error ?? "", /ambiguous/);
-		assert.match(selectResultTasks(tasks, "s1", ["bg-missing"]).error ?? "", /no such task/);
-		assert.match(selectResultTasks(tasks, "s1", [" "]).error ?? "", /non-empty/);
+		assert.match(selectHandleTasks(tasks, "s1", ["bg-aaaa"]).error ?? "", /ambiguous/);
+		assert.match(selectHandleTasks(tasks, "s1", ["bg-missing"]).error ?? "", /no such task/);
+		assert.match(selectHandleTasks(tasks, "s1", [" "]).error ?? "", /non-empty/);
 	});
 
-	test("default caps older results and explicit requests have a limit", () => {
-		const many = Array.from({ length: MAX_RESULT_TASKS + 2 }, (_, i) =>
-			makeTask({ id: `bg-${String(i).padStart(6, "0")}`, status: "done", endedAt: i, session: "s1" }));
-		const selected = selectResultTasks(many, "s1");
-		assert.equal(selected.tasks.length, MAX_RESULT_TASKS);
-		assert.equal(selected.tasks[0].id, "bg-000002");
+	test("default caps pending results oldest first; explicit requests have a limit", () => {
+		const many = Array.from({ length: MAX_HANDLE_TASKS + 2 }, (_, i) =>
+			makeTask({ id: `bg-${String(i).padStart(6, "0")}`, status: "done", endedAt: i + 1, parkedAt: i + 2, session: "s1" }));
+		const selected = selectHandleTasks(many, "s1");
+		assert.equal(selected.tasks.length, MAX_HANDLE_TASKS);
+		assert.equal(selected.tasks[0].id, "bg-000000");
 		assert.equal(selected.omitted, 2);
-		assert.match(selectResultTasks(many, "s1", many.map((t) => t.id)).error ?? "", /at most/);
+		assert.match(selectHandleTasks(many, "s1", many.map((t) => t.id)).error ?? "", /at most/);
+	});
+
+	test("acknowledgment removes completed tasks from footer but keeps them in ls data", () => {
+		const now = 500;
+		assert.deepEqual(footerTasks(tasks, now).parked.map((t) => t.id), ["bg-aaaaaa", "bg-aaaabb"]);
+		acknowledgeTasks(tasks, new Set(["bg-aaaaaa", "bg-cccccc"]), now);
+		assert.equal(tasks[0].handledAt, now);
+		assert.equal(tasks[2].handledAt, undefined); // running task still awaits its final result
+		assert.deepEqual(footerTasks(tasks, now).parked.map((t) => t.id), ["bg-aaaabb"]);
+		assert.deepEqual(footerTasks(tasks, now).fresh.map((t) => t.id), ["bg-aaaabb", "bg-dddddd"]);
+		assert.equal(tasks[0].status, "done"); // ls can still show it
+		assert.deepEqual(selectHandleTasks(tasks, "s1").tasks.map((t) => t.id), ["bg-aaaabb"]);
 	});
 });
 

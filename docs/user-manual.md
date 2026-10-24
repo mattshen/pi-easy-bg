@@ -11,7 +11,7 @@ When the command finishes, `easy-bg` shows a display-only card. You or the model
 
 Use `easy-bg` for commands that take more than about ten seconds, for example: a build, a test suite, a fetch job, a linter, a dev server, or a CI check.
 
-After the model starts a task, it can do other work or end its turn. It must not wait or check repeatedly. By default, the result does not start another model turn; check it with `easy_bg` `status`, `results`, or `logs` when needed.
+After the model starts a task, it can do other work or end its turn. It must not wait or check repeatedly. By default, the result does not start another model turn; check it with `easy_bg` `status`, `inspect`, or `handle` when needed.
 
 Do not use `easy-bg` for a short command. Use the built-in `bash` tool for that.
 
@@ -103,17 +103,17 @@ bg-9f2c7a  RUNNING      15s                 make -j8 build
 
 - The status word tells you the state. See section 2.7.
 - The time tells you how long the task ran or runs. It comes from the exit marker, not from the check time. A check runs every 1.5 seconds, so a status can be up to 1.5 seconds late.
-- The footer of the chat shows the same status words as `ls`: `bg: bg-9f2c7a RUNNING 15s`. A finished task shows `bg: bg-abaeb2 DONE exit=0` for ten minutes. Parked results show `bg: 1 result(s) parked → /easy-bg now`. If more than three tasks match, the footer shows the last three and `(+2)`.
+- The footer of the chat shows the same status words as `ls`: `bg: bg-9f2c7a RUNNING 15s`. A finished unhandled task shows `bg: bg-abaeb2 DONE exit=0` for up to ten minutes. Parked results show `bg: 1 result(s) parked → /easy-bg handle`. Once a completed task is handled, it leaves the footer but remains visible in `/easy-bg ls`. If more than three tasks match, the footer shows the last three and `(+2)`.
 
 `/easy-bg ls` does not use any model tokens. You can run it often.
 
-The model can check tasks with `easy_bg` `action=status`. To read multiple results and summarize them in the **current turn**, it can call `action=results` with `tasks: ["bg-...", "bg-..."]`. The tool returns each task's status, exit code and recent output. With no `tasks`, it returns the latest 10 finished tasks in this session. Each task has up to 4,000 characters of output. An explicit id can also select a running task and its current output. This read-only call does not start another turn or mark tasks handled. If the model has already ended its turn, a new user message is needed before it can call `results`. There is no `/easy-bg results` slash command: `/easy-bg now` is the explicit user command that starts a model turn.
+The model can check tasks with `easy_bg` `action=status`. To summarize multiple results in the **current turn**, it calls `action=handle` with `tasks: ["bg-...", "bg-..."]`. This returns each task's status, exit code and recent output, then marks completed tasks handled. With no `tasks`, it selects up to 10 unhandled parked results in this session, oldest first. Each task has up to 4,000 characters of output. An explicit id can also select a running task and its current output, but does not mark it handled until it finishes and is handled again. `action=inspect` reads one log without changing handled state. If the model has already ended its turn, a new user message is needed before it can use these actions. `/easy-bg handle` is the user command that starts a new model turn.
 
 ## 2.4 Read the output
 
 ```
-/easy-bg log bg-9f2c7a        # last 40 lines
-/easy-bg log bg-9f 200        # a short prefix is enough, if only one task matches
+/easy-bg inspect bg-9f2c7a    # last 40 lines; does not mark handled
+/easy-bg inspect bg-9f 200    # a short prefix is enough, if only one task matches
 ```
 
 The log file stays on disk. You can also open it yourself:
@@ -136,9 +136,9 @@ If the prefix matches more than one task, pi prints `ambiguous id prefix` and li
 
 A finished task does not take over the chat. This is the default behaviour (`--notify park`):
 
-1. The task finishes. pi shows a small result card. The card does not start a model turn. The footer shows `bg: 1 result(s) parked → /easy-bg now`.
-2. You can check the task with `/easy-bg ls` and `/easy-bg log <id>`; the model can check it with `easy_bg` `status` and `logs` during a later turn.
-3. The card stays display-only. Even when you are idle, pi does not ask the model to act. Use `/easy-bg now [id]` if you want to hand the result to the model.
+1. The task finishes. pi shows a small result card. The card does not start a model turn. The footer shows `bg: 1 result(s) parked → /easy-bg handle`.
+2. You can check the task with `/easy-bg ls` and `/easy-bg inspect <id>`; the model can check it with `easy_bg` `status` and `inspect` during a later turn.
+3. The card stays display-only. Even when you are idle, pi does not ask the model to act. Use `/easy-bg handle [id]` if you want to hand the result to the model.
 
 The card looks like this:
 
@@ -149,7 +149,7 @@ The card looks like this:
   [result 3/3] ZOTAC RTX 5090 SOLID DX 32GB        | $1,999 AUD | in stock: CN warehouse
   [13:01:23] 3 offers collected in 10s. spread=$490
   … 省略 7 行更早输出（Ctrl+O 展开）
-  /easy-bg now bg-d713db   立即交给模型 · /easy-bg log bg-d713db 看全文
+  /easy-bg handle bg-d713db   交给模型 · /easy-bg inspect bg-d713db 看日志
 ```
 
 `DONE` is green, `FAIL` / `TIMEOUT` / `KILLED` are red, `RUNNING` is yellow. The card shows the newest lines. Press `Ctrl+O` to see all saved lines (the last 12).
@@ -169,23 +169,23 @@ The card stays out of the model context until you explicitly hand it over. It do
 | This session, result not handled yet | kept | deleted |
 | A task from another pi session | kept | deleted |
 
-pi tells you what it did, for example: `3 cleared · 1 unhandled kept → /easy-bg now · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`.
+pi tells you what it did, for example: `3 cleared · 1 unhandled kept → /easy-bg handle · 1 from other sessions kept → /easy-bg clear --all · 1 running untouched`.
 
 A running task is never deleted. If pi deleted it, you could not stop it and you could not get its result.
 
 | You do | Result |
 |---|---|
-| `/easy-bg now` | pi starts a turn for the results now. It handles all parked results. |
-| `/easy-bg now bg-ab` | Only that task. If the prefix matches more than one task, pi lists the tasks. |
-| `/easy-bg ls` or `/easy-bg log <id>` | Inspect status or output yourself, without a model turn. |
+| `/easy-bg handle` | pi starts a turn for all pending parked results. Completed tasks leave the footer but stay in `ls`. |
+| `/easy-bg handle bg-ab` | Only that task. If the prefix matches more than one task, pi lists the tasks. |
+| `/easy-bg ls` or `/easy-bg inspect <id>` | Inspect status or output yourself, without a model turn or state change. |
 
 #### When does the model get a result?
 
-The model can inspect tasks explicitly with `easy_bg` `status`, `results`, and `logs`. These actions do not start new turns. Three opt-in paths can send a result or signal to the model:
+The model can inspect tasks with `easy_bg` `status` and `inspect`, or use `handle` to deliver results to its current turn and mark completed tasks handled. None of these tool actions starts a new turn. Three opt-in paths can send a result or signal to the model:
 
 | Path | Condition |
 |---|---|
-| `/easy-bg now [id]` | You explicitly hand over a parked result. If the model is busy, pi queues it until idle. |
+| `/easy-bg handle [id]` | You explicitly hand over a parked result. If the model is busy, pi queues it until idle. |
 | `--notify now` | You choose an automatic turn when the task ends. |
 | `--watch <pattern>` | You choose a one-time automatic turn when output matches. |
 
@@ -193,9 +193,9 @@ Pick a mode for one task:
 
 | `--notify` | Behaviour |
 |---|---|
-| `park` (default) | Show the card only. Inspect status/logs, or use `/easy-bg now`. |
+| `park` (default) | Show the card only. Inspect status/output, or use `/easy-bg handle`. |
 | `now` | Start a turn when the task ends. Use this only if you want an automatic wake-up. |
-| `manual` | No card and no message. Status and logs remain available. Same as `--no-notify`. |
+| `manual` | No card and no message. Status and inspect remain available. Same as `--no-notify`. |
 
 Tasks from another pi session do not automatically send a result to this model.
 
@@ -227,7 +227,7 @@ You can use `/easy-bg ls` to check a task without model tokens. Avoid tight poll
 |---|---|---|
 | `RUNNING` | The command is still running | Wait, or stop it |
 | `DONE` | Exit code 0 | Read the log if you need it |
-| `FAIL` | Exit code is not 0 | Read the log: `/easy-bg log <id>` |
+| `FAIL` | Exit code is not 0 | Read the log: `/easy-bg inspect <id>` |
 | `KILLED` | You stopped the task | None |
 | `TIMEOUT` | pi stopped the task after the time limit | Start it again with a longer limit |
 | `OUTPUT_CAP` | pi stopped the task because the log got too big | Make the command quieter, or raise the cap |
@@ -286,10 +286,10 @@ If you want pi to stop its tasks on exit, start pi with `--easy-bg-kill-all`.
 | The task shows `TIMEOUT` | The command needs more time | Start it again with a bigger `--timeout`, or `--timeout 0` |
 | The task shows `OUTPUT_CAP` | The command writes too much output | Make the command quieter, or set a bigger `EASY_BG_MAX_BYTES` |
 | No message and no card | You used `--no-notify` / `--notify manual`, or you changed `EASY_BG_DIR` | Run `/easy-bg ls` |
-| The card appears but the model does not act | Normal: parked results never start a model turn | Run `/easy-bg now`, or ask the model to check `status` and `logs` |
-| A result came back while I was doing something else | By design: the card never enters your next turn | Ignore it, or run `/easy-bg now` when you want it |
-| The card has no `■ background` line, or the card shows every log line | pi runs an older copy of the extension, or the extension failed to load | On start, pi shows `easy-bg v2.0.0 · /easy-bg help · notify: park|now|manual` at startup. If those are missing, read the start-up line `Failed to load extension "…"` and restart pi with `/quit` (a plain `/reload` may keep an old instance) |
-| The model waits with `sleep`/`tail` after starting a task | The model polled in a loop | Ask it to do other work or end its turn, then check the task later with `status` and `logs` |
+| The card appears but the model does not act | Normal: parked results never start a model turn | Run `/easy-bg handle`, or ask the model to use `handle` in its current turn |
+| A result came back while I was doing something else | By design: the card never enters your next turn | Ignore it, or run `/easy-bg handle` when you want it |
+| The card has no `■ background` line, or the card shows every log line | pi runs an older copy of the extension, or the extension failed to load | On start, pi shows `easy-bg v3.0.0 · /easy-bg help · notify: park|now|manual` at startup. If those are missing, read the start-up line `Failed to load extension "…"` and restart pi with `/quit` (a plain `/reload` may keep an old instance) |
+| The model waits with `sleep`/`tail` after starting a task | The model polled in a loop | Ask it to do other work or end its turn, then check the task later with `status`, `inspect`, or `handle` |
 | The model does not answer the wake-up message | The message waits for the running turn | Wait for the current answer |
 
 ## 2.12 中文速查
@@ -300,11 +300,11 @@ If you want pi to stop its tasks on exit, start pi with `--easy-bg-kill-all`.
 | `/easy-bg --name build --timeout 0 <命令>` | 具名、不限时（dev server 用 `--timeout 0`） |
 | `/easy-bg --watch /error/i <命令>` | 输出命中模式时提前通知一次 |
 | `/easy-bg ls` | 列出全部任务（不吃 token，可频繁用） |
-| `/easy-bg log <id> [行数]` | 看尾部日志，默认 40 行（`id` 可用唯一前缀，如 `bg-ab`） |
+| `/easy-bg inspect <id> [行数]` | 只读查看尾部日志，默认 40 行（`id` 可用唯一前缀，如 `bg-ab`） |
 | `/easy-bg clear` | Clear finished tasks of this session. Keeps results you have not handled yet, and keeps other sessions. |
 | `/easy-bg clear --all` | Clear every finished task from every session, including unhandled results. |
 | `/easy-bg stop <id>` | 终止整个进程组（前缀不唯一时会列出候选并拒绝执行） |
-| `/easy-bg now [id]` | 主动把 parked 的结果交给模型处理（默认不会自动投递） |
+| `/easy-bg handle [id]` | 主动把 parked 的结果交给模型处理（成功后从底部提示消失，但仍在 ls 中） |
 | `Ctrl+O` | 展开结果卡片看全部日志行；卡片默认只显示最近 5 行 |
 | `/easy-bg clear` | 删除已结束任务的记录与日志 |
 | `/easy-bg help` | 看用法与默认值 |

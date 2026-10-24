@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-10-24
+
+### Changed
+
+- Unified result delivery as `handle`: `/easy-bg handle [id]` opens a new model turn;
+  `easy_bg action=handle` supplies up to 10 tasks to the current turn. On successful
+  delivery, completed tasks leave the pending footer but remain available in `ls`.
+  With no ids, the agent handles the oldest pending parked tasks first.
+- Renamed `/easy-bg log` and `easy_bg action=logs` to `inspect`; inspecting a log
+  does not mark the task handled. Removed the old `/easy-bg now` and `action=results`
+  interfaces. Existing task records remain readable.
+
 ## [2.0.0] - 2026-10-21
 
 ### Added
